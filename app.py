@@ -1,221 +1,279 @@
-from flask import Flask
+import os
+import secrets
+import sqlite3
+from pathlib import Path
+
+from flask import (
+    Flask,
+    abort,
+    redirect,
+    render_template_string,
+    request,
+    session,
+    url_for,
+)
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+
+# Ahora guarda localmente. Después podremos apuntar al disco de Render.
+CARPETA_DATOS = Path(
+    os.environ.get("DATA_DIR", Path(__file__).parent / "data")
+)
+CARPETA_DATOS.mkdir(parents=True, exist_ok=True)
+
+BASE_DATOS = CARPETA_DATOS / "practica.db"
 
 
-@app.route("/")
-def inicio():
-    return """
-    <!DOCTYPE html>
-    <html lang="es">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Nicolás | Mi primera web</title>
+def conectar():
+    conexion = sqlite3.connect(BASE_DATOS, timeout=20)
+    conexion.row_factory = sqlite3.Row
+    return conexion
 
-        <style>
-            * {
-                box-sizing: border-box;
-            }
 
-            body {
-                margin: 0;
-                min-height: 100vh;
-                background: #101827;
-                color: #f5f7fa;
-                font-family: Arial, sans-serif;
-            }
+# Crea la tabla si todavía no existe.
+conexion = conectar()
 
-            .contenedor {
-                max-width: 1050px;
-                margin: auto;
-                padding: 30px 24px;
-            }
+try:
+    conexion.execute("""
+        CREATE TABLE IF NOT EXISTS personas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            fecha_registro TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conexion.commit()
+finally:
+    conexion.close()
 
-            header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                gap: 20px;
-            }
 
-            .logo {
-                font-size: 22px;
-                font-weight: bold;
-            }
+PAGINA = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mi primera base de datos</title>
 
-            .logo span {
-                color: #7de2bc;
-            }
+    <style>
+        * { box-sizing: border-box; }
 
-            .etiqueta {
-                border: 1px solid #344258;
-                border-radius: 30px;
-                padding: 9px 14px;
-                color: #b9c7db;
-                font-size: 12px;
-            }
+        body {
+            margin: 0;
+            padding: 40px 20px;
+            background: #101827;
+            color: #f5f7fa;
+            font-family: Arial, sans-serif;
+        }
 
-            main {
-                padding: 90px 0 60px;
-            }
+        main {
+            max-width: 750px;
+            margin: auto;
+        }
 
-            .titulo-pequeno {
-                color: #7de2bc;
-                font-size: 13px;
-                letter-spacing: 3px;
-            }
+        .etiqueta {
+            color: #7de2bc;
+            letter-spacing: 2px;
+            font-size: 12px;
+        }
 
-            h1 {
-                max-width: 800px;
-                margin: 24px 0;
-                font-size: clamp(44px, 8vw, 82px);
-                line-height: 1.08;
-                letter-spacing: -3px;
-            }
+        h1 {
+            font-size: clamp(32px, 6vw, 48px);
+        }
 
-            h1 span {
-                color: #7de2bc;
-            }
+        .descripcion {
+            color: #b9c7db;
+            line-height: 1.6;
+        }
 
-            .descripcion {
-                max-width: 580px;
-                color: #b9c7db;
-                font-size: 19px;
-                line-height: 1.7;
-            }
+        .panel {
+            margin-top: 28px;
+            padding: 24px;
+            background: #192438;
+            border: 1px solid #344258;
+            border-radius: 16px;
+        }
 
-            .boton {
-                display: inline-block;
-                margin-top: 24px;
-                padding: 16px 24px;
-                background: #7de2bc;
-                color: #101827;
-                font-weight: bold;
-                text-decoration: none;
-                border-radius: 12px;
-                transition: background 0.2s, transform 0.2s;
-            }
+        label {
+            display: block;
+            margin-bottom: 10px;
+        }
 
-            .boton:hover {
-                background: #a1efd2;
-                transform: translateY(-3px);
-            }
+        input {
+            width: 100%;
+            padding: 14px;
+            border: 1px solid #526078;
+            border-radius: 8px;
+            font: inherit;
+        }
 
-            .boton:focus-visible {
-                outline: 3px solid white;
-                outline-offset: 5px;
-            }
+        button {
+            margin-top: 16px;
+            padding: 14px 22px;
+            background: #7de2bc;
+            color: #101827;
+            border: none;
+            border-radius: 8px;
+            font: bold 16px Arial, sans-serif;
+            cursor: pointer;
+        }
 
-            .tarjetas {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: 18px;
-                margin-top: 65px;
-            }
+        button:hover { background: #a1efd2; }
 
-            .tarjeta {
-                background: #192438;
-                padding: 26px;
-                border: 1px solid #2c3a50;
-                border-radius: 18px;
-            }
+        .tabla {
+            overflow-x: auto;
+        }
 
-            .numero {
-                color: #7de2bc;
-                font-size: 13px;
-            }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
 
-            .tarjeta h2 {
-                font-size: 21px;
-                margin: 16px 0 10px;
-            }
+        th, td {
+            padding: 14px 10px;
+            border-bottom: 1px solid #344258;
+        }
 
-            .tarjeta p {
-                color: #b9c7db;
-                line-height: 1.6;
-                margin-bottom: 0;
-            }
+        th { color: #7de2bc; }
 
-            footer {
-                border-top: 1px solid #2c3a50;
-                padding: 24px 0;
-                color: #b9c7db;
-                font-size: 13px;
-            }
+        .aviso {
+            padding: 12px;
+            background: #55352a;
+            border-radius: 8px;
+        }
+    </style>
+</head>
 
-            @media (max-width: 650px) {
-                main {
-                    padding-top: 60px;
-                }
+<body>
+    <main>
+        <p class="etiqueta">PYTHON + FLASK + SQLITE</p>
+        <h1>Mi primera base de datos</h1>
 
-                .tarjetas {
-                    grid-template-columns: 1fr;
-                    margin-top: 40px;
-                }
+        <p class="descripcion">
+            Escribe un nombre, guárdalo y comprueba cómo aparece
+            en la lista.
+        </p>
 
-                h1 {
-                    letter-spacing: -2px;
-                }
-            }
-        </style>
-    </head>
+        <section class="panel">
+            <h2>Registrar persona</h2>
 
-    <body>
-        <div class="contenedor">
-            <header>
-                <div class="logo">Nicolás<span>.</span></div>
-                <span class="etiqueta">Mi primer proyecto web</span>
-            </header>
+            {% if error %}
+                <p class="aviso" role="alert">{{ error }}</p>
+            {% endif %}
 
-            <main>
-                <p class="titulo-pequeno">PYTHON · FLASK · DESARROLLO WEB</p>
-
-                <h1>De una idea<br>a una <span>página real.</span></h1>
-
-                <p class="descripcion">
-                    Hola, soy Nicolás. Estoy aprendiendo a construir
-                    aplicaciones con Python y a compartir mis
-                    proyectos en internet.
-                </p>
-
-                <a
-                    class="boton"
-                    href="https://github.com/nicobilbao29/hola-render"
-                    target="_blank"
-                    rel="noopener noreferrer"
+            <form method="post">
+                <input
+                    type="hidden"
+                    name="csrf_token"
+                    value="{{ csrf_token }}"
                 >
-                    Ver el código en GitHub ↗
-                </a>
 
-                <section class="tarjetas" aria-label="Cómo funciona este proyecto">
-                    <article class="tarjeta">
-                        <span class="numero">01 / CONSTRUIR</span>
-                        <h2>Python y Flask</h2>
-                        <p>El código recibe la visita y entrega esta página.</p>
-                    </article>
+                <label for="nombre">Nombre</label>
+                <input
+                    id="nombre"
+                    name="nombre"
+                    maxlength="100"
+                    placeholder="Ejemplo: Nicolás"
+                    value="{{ nombre }}"
+                    required
+                >
 
-                    <article class="tarjeta">
-                        <span class="numero">02 / GUARDAR</span>
-                        <h2>GitHub</h2>
-                        <p>El repositorio guarda el código y su historial de cambios.</p>
-                    </article>
+                <button type="submit">Guardar nombre</button>
+            </form>
+        </section>
 
-                    <article class="tarjeta">
-                        <span class="numero">03 / PUBLICAR</span>
-                        <h2>Render</h2>
-                        <p>El alojamiento ejecuta la aplicación en internet.</p>
-                    </article>
-                </section>
-            </main>
+        <section class="panel">
+            <h2>Personas registradas: {{ personas|length }}</h2>
 
-            <footer>
-                Creado por Nicolás Bilbao · Aprendiendo con proyectos reales.
-            </footer>
-        </div>
-    </body>
-    </html>
-    """
+            {% if personas %}
+                <div class="tabla">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Nombre</th>
+                                <th>Fecha (UTC)</th>
+                            </tr>
+                        </thead>
+
+                        <tbody>
+                            {% for persona in personas %}
+                                <tr>
+                                    <td>{{ persona.id }}</td>
+                                    <td>{{ persona.nombre }}</td>
+                                    <td>{{ persona.fecha_registro }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p class="descripcion">
+                    Todavía no hay registros. Agrega el primero.
+                </p>
+            {% endif %}
+        </section>
+
+        <p class="descripcion">
+            Práctica pública: usa nombres ficticios.
+            En Render gratuito los datos son temporales.
+        </p>
+    </main>
+</body>
+</html>
+"""
+
+
+@app.route("/", methods=["GET", "POST"])
+def inicio():
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(32)
+
+    error = None
+    nombre = ""
+
+    if request.method == "POST":
+        token = request.form.get("csrf_token", "")
+
+        if not secrets.compare_digest(token, session["csrf_token"]):
+            abort(400, "Recarga la página y vuelve a enviar el formulario.")
+
+        nombre = request.form.get("nombre", "").strip()
+
+        if not 1 <= len(nombre) <= 100:
+            error = "Escribe un nombre de entre 1 y 100 caracteres."
+        else:
+            conexion = conectar()
+
+            try:
+                conexion.execute(
+                    "INSERT INTO personas (nombre) VALUES (?)",
+                    (nombre,),
+                )
+                conexion.commit()
+            finally:
+                conexion.close()
+
+            # Redirige para evitar duplicados al actualizar la página.
+            return redirect(url_for("inicio"))
+
+    conexion = conectar()
+
+    try:
+        personas = conexion.execute(
+            "SELECT * FROM personas ORDER BY id DESC"
+        ).fetchall()
+    finally:
+        conexion.close()
+
+    return render_template_string(
+        PAGINA,
+        personas=personas,
+        error=error,
+        nombre=nombre,
+        csrf_token=session["csrf_token"],
+    )
 
 
 if __name__ == "__main__":
