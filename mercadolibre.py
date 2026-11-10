@@ -73,6 +73,7 @@ def install(app, db, private):
     app.config.setdefault('ML_CLIENT_ID',os.environ.get('ML_CLIENT_ID',''))
     app.config.setdefault('ML_CLIENT_SECRET',os.environ.get('ML_CLIENT_SECRET',''))
     app.config.setdefault('ML_REDIRECT_URI',os.environ.get('ML_REDIRECT_URI',''))
+    app.config.setdefault('ML_EXPECTED_SELLER_ID',os.environ.get('ML_EXPECTED_SELLER_ID','').strip())
     data=Path(app.config['DATA_DIR'])
     internal=data/'mercadolibre_privado.sqlite'
     @contextmanager
@@ -112,9 +113,12 @@ def install(app, db, private):
     def save_tokens(result):
         if not result.get('access_token') or not result.get('refresh_token') or not str(result.get('user_id','')).isdigit():
             raise MeliError('La autorización no incluyó los datos necesarios. Activa Refresh Token y vuelve a conectar.')
+        expected=str(app.config['ML_EXPECTED_SELLER_ID']).strip()
+        if expected and str(result['user_id'])!=expected:
+            raise MeliError('La cuenta autorizada no coincide con ML_EXPECTED_SELLER_ID. Inicia sesión con el vendedor correcto.')
         current=get('seller')
         if current and current!=str(result['user_id']):
-            raise MeliError('Conecta la misma cuenta de vendedor. Este catálogo ya está vinculado a otra cuenta.')
+            raise MeliError('Este catálogo está vinculado a otra cuenta. Usa Cambiar cuenta desde el panel antes de autorizar otro vendedor.')
         with state_db() as c:
             for key,value in {'access':result['access_token'],'refresh':result['refresh_token'],'expires':time.time()+int(result.get('expires_in',21600)),'seller':result['user_id'],'error':''}.items():
                 c.execute('INSERT OR REPLACE INTO estado VALUES (?,?)',(key,str(value)))
@@ -232,7 +236,7 @@ def install(app, db, private):
                 return
         raise MeliError('La importación admite hasta 10.000 publicaciones.')
 
-    def tick():
+    def process_tick():
         if not configured() or not get('refresh'):
             return False
         if get('scan_requested')=='1' and float(get('scan_retry','0'))<=time.time():
@@ -257,6 +261,18 @@ def install(app, db, private):
                 c.execute('UPDATE pendientes SET intentos=intentos+1,proximo=?,error=? WHERE item_id=? AND version=?',(time.time()+min(3600,30*2**min(job['intentos'],7)),message,job['item_id'],job['version']))
             put('error',message)
         return True
+
+    def tick():
+        # Coordina al consumidor con el cambio explícito de cuenta.
+        lock=StorageLock(data/'.mercadolibre_operation.lock')
+        try:
+            lock.acquire(timeout=0)
+        except TimeoutError:
+            return False
+        try:
+            return process_tick()
+        finally:
+            lock.release()
 
     wake=threading.Event()
     thread_guard=threading.Lock()
@@ -300,8 +316,9 @@ def install(app, db, private):
             pending=c.execute('SELECT COUNT(*) FROM pendientes').fetchone()[0]
             failures=c.execute("SELECT item_id,error FROM pendientes WHERE error!='' ORDER BY item_id LIMIT 10").fetchall()
         with db() as c:
-            imported=c.execute('SELECT COUNT(*) FROM catalogo_ml_items').fetchone()[0]
-        return render_template('mercadolibre.html',ready=configured(),connected=bool(get('refresh')),seller=get('seller'),last=get('last'),pending=pending,failures=failures,imported=imported,error=get('error'),scanning=get('scan_requested')=='1',redirect_uri=app.config['ML_REDIRECT_URI'])
+            imported=c.execute('SELECT COUNT(*) FROM catalogo_ml_items WHERE seller_id=?',(get('seller'),)).fetchone()[0]
+            has_imports=bool(c.execute('SELECT 1 FROM catalogo_ml_items LIMIT 1').fetchone())
+        return render_template('mercadolibre.html',ready=configured(),connected=bool(get('refresh')),has_imports=has_imports,seller=get('seller'),nickname=get('nickname'),expected_seller=app.config['ML_EXPECTED_SELLER_ID'],last=get('last'),pending=pending,failures=failures,imported=imported,error=get('error'),scanning=get('scan_requested')=='1',redirect_uri=app.config['ML_REDIRECT_URI'])
 
     @bp.post('/admin/mercadolibre/conectar')
     @private
@@ -311,7 +328,7 @@ def install(app, db, private):
             return redirect(url_for('meli.dashboard'))
         state=secrets.token_urlsafe(32)
         verifier=secrets.token_urlsafe(64)
-        session['ml_oauth']={'state':state,'verifier':verifier,'created':time.time()}
+        session['ml_oauth']={'state':state,'verifier':verifier,'created':time.time(),'generation':get('generation','0')}
         challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
         query={'response_type':'code','client_id':app.config['ML_CLIENT_ID'],'redirect_uri':app.config['ML_REDIRECT_URI'],'state':state,'code_challenge':challenge,'code_challenge_method':'S256'}
         return redirect('https://auth.mercadolibre.cl/authorization?'+urlencode(query))
@@ -328,15 +345,49 @@ def install(app, db, private):
             return redirect(url_for('meli.dashboard'))
         try:
             with StorageLock(data/'.mercadolibre_auth.lock').acquire():
+                if oauth.get('generation','0')!=get('generation','0'):
+                    raise MeliError('La conexión cambió mientras autorizabas. Vuelve a conectar desde el panel.')
                 result=api_request('/oauth/token',form={'grant_type':'authorization_code','client_id':app.config['ML_CLIENT_ID'],'client_secret':app.config['ML_CLIENT_SECRET'],'code':request.args['code'],'redirect_uri':app.config['ML_REDIRECT_URI'],'code_verifier':oauth['verifier']})
                 # Verificar el sitio antes de persistir una autorización.
                 user=api_request('/users/me',result.get('access_token'))
                 if user.get('site_id')!='MLC' or str(user.get('id'))!=str(result.get('user_id')):
                     raise MeliError('Esta integración está preparada para una cuenta de Mercado Libre Chile.')
                 save_tokens(result)
+                put('nickname',str(user.get('nickname',''))[:100])
             flash('Cuenta conectada. Pulsa Importar y actualizar productos.','success')
         except (MeliError,TimeoutError) as error:
             flash(str(error),'error')
+        return redirect(url_for('meli.dashboard'))
+
+    @bp.post('/admin/mercadolibre/desconectar')
+    @private
+    def disconnect():
+        if request.form.get('confirmar')!='si':
+            flash('Marca la confirmación para desconectar y ocultar los productos importados.','error')
+            return redirect(url_for('meli.dashboard'))
+        operation=StorageLock(data/'.mercadolibre_operation.lock')
+        try:
+            operation.acquire(timeout=1)
+        except TimeoutError:
+            flash('Hay una sincronización en curso. Espera a que termine y vuelve a pulsar Cambiar cuenta.','error')
+            return redirect(url_for('meli.dashboard'))
+        try:
+            with StorageLock(data/'.mercadolibre_auth.lock').acquire():
+                generation=str(int(get('generation','0'))+1)
+                with StorageLock(data/'.catalogo.lock').acquire():
+                    with db() as c:
+                        # Ambas bases se actualizan en una sola transacción SQLite.
+                        c.execute('ATTACH DATABASE ? AS ml_private',(str(internal),))
+                        c.execute('UPDATE catalogo_productos SET activo=0 WHERE id IN (SELECT producto_id FROM catalogo_ml_items)')
+                        c.execute('DELETE FROM ml_private.pendientes')
+                        c.execute('DELETE FROM ml_private.estado')
+                        c.execute("INSERT INTO ml_private.estado VALUES ('generation',?)",(generation,))
+            session.pop('ml_oauth',None)
+            flash('Cuenta desconectada del catálogo. Los productos importados quedaron ocultos; los manuales se conservaron. Inicia sesión en Mercado Libre con la cuenta correcta y pulsa Conectar mi cuenta.','success')
+        except (sqlite3.Error,OSError,TimeoutError):
+            flash('No se pudo completar el cambio de cuenta. Vuelve a intentarlo.','error')
+        finally:
+            operation.release()
         return redirect(url_for('meli.dashboard'))
 
     @bp.post('/admin/mercadolibre/sincronizar')
@@ -377,6 +428,10 @@ def install(app, db, private):
             return {'error':'cuenta no autorizada'},403
         try:
             with state_db(timeout=0.1) as c:
+                c.execute('BEGIN IMMEDIATE')
+                current_seller=c.execute("SELECT valor FROM estado WHERE clave='seller'").fetchone()
+                if not current_seller or str(body.get('user_id'))!=current_seller[0]:
+                    return {'error':'cuenta no autorizada'},403
                 if c.execute('SELECT COUNT(*) FROM pendientes').fetchone()[0]>=10000 and not c.execute('SELECT 1 FROM pendientes WHERE item_id=?',(match[1],)).fetchone():
                     return {'error':'cola temporalmente llena'},503
                 enqueue([match[1]],c)

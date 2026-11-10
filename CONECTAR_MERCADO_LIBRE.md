@@ -118,7 +118,7 @@ Render gratuito también se suspende por inactividad: puede retrasar o perder av
 - **Redirect URI no válido:** las direcciones en Mercado Libre y Render deben coincidir exactamente, incluido HTTPS, ruta y ausencia de barra final.
 - **Autorización vencida o sesión incorrecta:** entra otra vez a administración y pulsa Conectar mi cuenta. No abras el regreso OAuth manualmente.
 - **Acceso rechazado (403):** revisa los permisos y vuelve a autorizar después de cambiarlos. Mercado Libre puede exigir verificaciones adicionales de la cuenta o aplicación.
-- **Cuenta de otro vendedor:** usa la misma cuenta chilena ya vinculada. Esta versión no cambia de vendedor dentro del mismo catálogo.
+- **Cuenta de otro vendedor:** usa la misma cuenta chilena ya vinculada. Usa Cambiar cuenta en el panel para desconectar la cuenta anterior antes de autorizar otro vendedor.
 - **Pendientes con error:** lee el motivo en el panel y reintenta con Importar y actualizar productos.
 
 ## Verificación técnica incluida
@@ -135,3 +135,30 @@ Documentación oficial consultada:
 - https://developers.mercadolibre.cl/permisos-funcionales
 - https://developers.mercadolibre.cl/es_ar/productos-recibe-notificaciones
 - https://developers.mercadolibre.cl/items-y-busquedas
+
+
+## 9. Si autorizaste una cuenta equivocada
+
+App ID y Client Secret identifican la aplicación; el vendedor queda definido por la cuenta con la que se autoriza en Mercado Libre. Cambiar las claves en Render no cambia ni borra una autorización ya guardada.
+
+1. Actualiza a esta versión conservando .env y data. Descarga un respaldo antes de desplegar en Render gratuito.
+2. Abre Administración → Mercado Libre → Cambiar cuenta de Mercado Libre.
+3. Lee y marca la confirmación. Pulsa Desconectar para cambiar cuenta.
+4. Se ocultan los productos importados, conservando sus datos y vínculos. Los productos manuales y las fotos de portada no cambian; revisa las portadas si habías elegido imágenes de la cuenta anterior. Se cancelan tareas pendientes y se elimina la autorización local. No se borran publicaciones de Mercado Libre ni se revoca el permiso en el proveedor.
+5. Abre una ventana privada o de incógnito. En esa ventana inicia sesión en Mercado Libre con tu vendedor correcto y verifica su usuario.
+6. En la misma ventana, entra al administrador de tu catálogo y pulsa Conectar mi cuenta. Autoriza la integración.
+7. Revisa el nombre de usuario y el número de vendedor que muestra el panel. Después pulsa Importar y actualizar productos.
+
+Si hay una sincronización en curso, el panel te pedirá esperar antes de desconectar para evitar mezclar operaciones. Si se perdieron los tokens con el despliegue gratuito, puedes conectar directamente; las publicaciones que vuelvas a importar se identifican por su código MLC.
+
+Opcional: si conoces el ID del vendedor correcto, agrega en Render `ML_EXPECTED_SELLER_ID` con ese número. La aplicación rechazará autorizar a otro vendedor, aunque el navegador tenga una sesión distinta. Ese número no es el App ID: corresponde al usuario vendedor. No adivines el valor; confírmalo en la cuenta correcta. Esta variable no cambia el vendedor ya guardado: usa primero Cambiar cuenta si hay una conexión equivocada.
+
+Para subir este ajuste, copia del ZIP estos cuatro archivos sobre tu proyecto actual: app.py, mercadolibre.py, templates/mercadolibre.html y CONECTAR_MERCADO_LIBRE.md. Desde tu carpeta ya conectada a GitHub:
+
+```powershell
+git add app.py mercadolibre.py templates/mercadolibre.html CONECTAR_MERCADO_LIBRE.md
+git commit -m "Permitir cambiar cuenta de Mercado Libre"
+git push origin main
+```
+
+No necesitas crear otra aplicación de Mercado Libre para cambiar de vendedor, siempre que la aplicación permita autorizar esa cuenta. Si Mercado Libre rechaza el acceso, revisa la elegibilidad y los permisos de la cuenta y de la aplicación.

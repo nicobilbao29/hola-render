@@ -182,3 +182,66 @@ class MeliTest(unittest.TestCase):
         self.assertIn(PHOTO,html)
         self.assertIn('Portada importada',html)
         self.assertEqual(self.ml['get']('refresh'),'refresh-test')
+
+    def test_change_account_requires_confirmation_and_preserves_manual_products(self):
+        self.setup_meli()
+        token=self.login()
+        self.client.post('/admin/producto/nuevo',data=self.values(token,nombre='Manual conservado'))
+        with patch('mercadolibre.api_request',side_effect=self.fake_api):
+            self.ml['import_item']('MLC123456789')
+        self.ml['enqueue'](['MLC123456789'])
+        response=self.client.post('/admin/mercadolibre/desconectar',data={'csrf_token':token})
+        self.assertEqual(response.status_code,302)
+        self.assertEqual(self.ml['get']('seller'),'123')
+        self.assertEqual(self.client.post('/admin/mercadolibre/desconectar',data={'confirmar':'si'}).status_code,400)
+        self.client.post('/admin/mercadolibre/desconectar',data={'csrf_token':token,'confirmar':'si'})
+        self.assertEqual(self.ml['get']('seller'),'')
+        self.assertEqual(self.ml['get']('access'),'')
+        self.assertEqual(self.ml['get']('refresh'),'')
+        with self.ml['state_db']() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM pendientes').fetchone()[0],0)
+        html=self.client.get('/catalogo').get_data(as_text=True)
+        self.assertIn('Manual conservado',html)
+        self.assertNotIn('Chal de Mercado Libre',html)
+        self.assertIn('Desconectar para cambiar cuenta',self.client.get('/admin/mercadolibre').get_data(as_text=True))
+        # Una cuenta nueva se puede autorizar después de la desconexión explícita.
+        self.client.post('/admin/mercadolibre/conectar',data={'csrf_token':token})
+        with self.client.session_transaction() as session:
+            state=session['ml_oauth']['state']
+        with patch('mercadolibre.api_request',side_effect=[{'access_token':'new','refresh_token':'new-r','user_id':456,'expires_in':21600},{'id':456,'site_id':'MLC','nickname':'VENDEDOR_CORRECTO'}]):
+            self.client.get('/mercadolibre/callback?state='+state+'&code=test')
+        self.assertEqual(self.ml['get']('seller'),'456')
+        self.assertIn('VENDEDOR_CORRECTO',self.client.get('/admin/mercadolibre').get_data(as_text=True))
+        with sqlite3.connect(self.data/'practica.db') as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM catalogo_ml_items').fetchone()[0],1)
+        self.assertEqual(self.notify().status_code,403)
+
+    def test_expected_seller_and_old_authorization_are_rejected(self):
+        self.setup_meli()
+        token=self.login()
+        self.app.config['ML_EXPECTED_SELLER_ID']='999'
+        self.client.post('/admin/mercadolibre/conectar',data={'csrf_token':token})
+        with self.client.session_transaction() as session:
+            old_oauth=dict(session['ml_oauth'])
+            state=old_oauth['state']
+        with patch('mercadolibre.api_request',side_effect=[{'access_token':'wrong','refresh_token':'wrong-r','user_id':123,'expires_in':21600},{'id':123,'site_id':'MLC'}]):
+            self.client.get('/mercadolibre/callback?state='+state+'&code=test')
+        self.assertEqual(self.ml['get']('access'),'access-test')
+        self.assertIn('ML_EXPECTED_SELLER_ID',self.client.get('/admin/mercadolibre').get_data(as_text=True))
+        self.client.post('/admin/mercadolibre/desconectar',data={'csrf_token':token,'confirmar':'si'})
+        with self.client.session_transaction() as session:
+            session['ml_oauth']=old_oauth
+        with patch('mercadolibre.api_request') as api:
+            self.client.get('/mercadolibre/callback?state='+state+'&code=test')
+            api.assert_not_called()
+        self.assertEqual(self.ml['get']('refresh'),'')
+
+    def test_change_account_waits_for_worker_instead_of_racing(self):
+        from respaldos import StorageLock
+        self.setup_meli()
+        token=self.login()
+        with StorageLock(self.data/'.mercadolibre_operation.lock').acquire():
+            response=self.client.post('/admin/mercadolibre/desconectar',data={'csrf_token':token,'confirmar':'si'})
+            self.assertEqual(response.status_code,302)
+            self.assertEqual(self.ml['get']('seller'),'123')
+        self.assertIn('sincronización en curso',self.client.get('/admin/mercadolibre').get_data(as_text=True))
