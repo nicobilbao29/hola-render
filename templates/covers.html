@@ -1,0 +1,34 @@
+{% extends 'admin_base.html' %}
+{% block admin_title %}Fotos de portada{% endblock %}
+{% block admin_content %}
+<p>Elige las fotos grandes de la página principal. Las visibles cambian cada 5 segundos, en el orden de esta lista.</p>
+<form method="post" enctype="multipart/form-data" class="panel form-panel">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<h2>Agregar a la portada</h2>
+<label>Subir fotos desde tu equipo<input type="file" name="fotos" multiple accept="image/jpeg,image/png,image/webp"></label>
+<p class="field-hint">JPG, PNG o WEBP. Hasta 6 MB por foto y 10 fotos en total. Recomendamos fotos verticales, con el producto al centro.</p>
+<label>O elegir una foto de un producto<select name="foto_producto"><option value="">Seleccionar foto…</option>{% for p in product_photos %}<option value="{{ p.id }}">{{ p.nombre }} — foto {{ p.id }}</option>{% endfor %}</select></label>
+<div class="cover-picker" data-cover-picker>{% for p in product_photos %}<label><input type="radio" name="foto_vista" value="{{ p.id }}"><img src="{{ photo_src(p.archivo) }}" alt="{{ p.nombre }}" loading="lazy"><span>{{ p.nombre }}</span></label>{% endfor %}</div>
+<label>Texto sobre la foto (opcional)<input name="titulo" maxlength="100" placeholder="Detalles para una ocasión especial"></label>
+<button class="button dark">Agregar a la portada →</button>
+<p class="field-hint">Se guarda una copia independiente: quitar la foto del producto no borra su portada.</p>
+</form>
+<h2>Orden y visibilidad · {{ covers|length }}/10</h2>
+{% for c in covers %}
+<article class="panel cover-row">
+<img class="cover-preview" src="{{ url_for('photo',name=c.archivo) }}" alt="Vista previa de portada {{ loop.index }}">
+<form method="post" action="{{ url_for('manage_cover',cover_id=c.id,action='guardar') }}" class="cover-details">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<strong>Foto {{ loop.index }} · {{ 'Visible' if c.activo else 'Oculta' }}</strong>
+<label>Texto sobre la foto<input name="titulo" maxlength="100" value="{{ c.titulo }}"></label>
+<label class="check"><input type="checkbox" name="activo" {% if c.activo %}checked{% endif %}> Mostrar en la página principal</label>
+<button class="button dark small">Guardar cambios</button>
+</form>
+<div class="cover-actions">{% for action,label in [('subir','↑ Subir'),('bajar','↓ Bajar'),('quitar','Quitar foto')] %}
+<form method="post" action="{{ url_for('manage_cover',cover_id=c.id,action=action) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button outline small">{{ label }}</button></form>
+{% endfor %}</div>
+</article>
+{% else %}<div class="panel"><p>Aún no has agregado fotos propias. La página muestra las tres fotos de ejemplo.</p></div>{% endfor %}
+<p class="field-hint">Si ocultas o quitas todas, vuelven las fotos de ejemplo. Con una sola visible, la portada queda fija. Los respaldos incluyen tus portadas.</p>
+<a class="button outline" href="{{ url_for('catalog') }}" target="_blank" rel="noopener">Ver página principal ↗</a>
+{% endblock %}

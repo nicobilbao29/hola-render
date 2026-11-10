@@ -4,7 +4,6 @@ import re
 import secrets
 import sqlite3
 import tempfile
-import zipfile
 from contextlib import contextmanager
 from datetime import timedelta
 from functools import wraps
@@ -12,12 +11,13 @@ from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
 from dotenv import load_dotenv
-from flask import Flask, abort, flash, redirect, render_template, request, send_file, send_from_directory, session, url_for
+from flask import Flask, abort, flash, g, redirect, render_template, request, send_file, send_from_directory, session, url_for
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash
 from imagenes import descargar_foto, guardar_foto
+from respaldos import (MAX_ZIP, StorageLock, apply_review, discard_stage, load_review, make_backup, previous_backups, review_backup)
 
 load_dotenv(Path(__file__).with_name('.env'))
 
@@ -74,6 +74,10 @@ def create_app(test_config=None):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 producto_id INTEGER NOT NULL REFERENCES catalogo_productos(id) ON DELETE CASCADE,
                 archivo TEXT NOT NULL UNIQUE, orden INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS catalogo_portadas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, archivo TEXT NOT NULL UNIQUE,
+                titulo TEXT NOT NULL DEFAULT '', orden INTEGER NOT NULL DEFAULT 0,
+                activo INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS catalogo_configuracion (
                 clave TEXT PRIMARY KEY, valor TEXT NOT NULL);
         ''')
@@ -94,18 +98,35 @@ def create_app(test_config=None):
 
     @app.before_request
     def csrf_check():
+        if request.endpoint == 'meli.notifications':
+            request.max_content_length = 16 * 1024
+            return  # JSON público: valida cuenta/recurso y solo agenda consultas autenticadas.
+        if request.method == 'POST' and request.path.startswith('/admin/restaurar'):
+            request.max_content_length = MAX_ZIP + 1024 * 1024
         if request.method == 'POST':
             expected = session.get('csrf', '')
             actual = request.form.get('csrf_token', '')
             if not expected or not secrets.compare_digest(actual, expected):
                 abort(400, 'La sesión venció. Recarga la página y vuelve a intentarlo.')
+        if request.method == 'POST' or request.endpoint == 'backup':
+            try:
+                g.storage_lock = StorageLock(data / '.catalogo.lock').acquire()
+            except TimeoutError:
+                abort(503, 'Hay otra operación en curso. Espera unos segundos y vuelve a intentar.')
+
+    @app.teardown_request
+    def release_storage_lock(error):
+        lock = g.pop('storage_lock', None)
+        if lock:
+            lock.release()
+
 
     @app.after_request
     def headers(response):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-        if request.path.startswith('/admin'):
+        if request.path.startswith('/admin') or request.path == '/mercadolibre/callback':
             response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -124,7 +145,11 @@ def create_app(test_config=None):
 
     @app.context_processor
     def context():
-        return {'config': settings(), 'csrf_token': csrf, 'wa_link': wa_link, 'is_admin': bool(session.get('admin'))}
+        return {'config': settings(), 'csrf_token': csrf, 'wa_link': wa_link, 'is_admin': bool(session.get('admin')), 'photo_src': photo_src}
+
+    def photo_src(name):
+        from mercadolibre import photo_url
+        return photo_url(name) or url_for('photo', name=name)
 
     def private(fn):
         @wraps(fn)
@@ -143,6 +168,8 @@ def create_app(test_config=None):
             item = conn.execute('''SELECT p.*, c.nombre categoria FROM catalogo_productos p
                 JOIN catalogo_categorias c ON c.id=p.categoria_id WHERE p.id=?''', (product_id,)).fetchone()
             photos = conn.execute('SELECT * FROM catalogo_fotos WHERE producto_id=? ORDER BY orden,id', (product_id,)).fetchall()
+            if public:
+                photos = list(photos) + conn.execute('SELECT id,url archivo,orden FROM catalogo_ml_fotos WHERE producto_id=? ORDER BY orden,id', (product_id,)).fetchall()
         if item is None or (public and not item['activo']):
             abort(404)
         return item, photos
@@ -159,12 +186,17 @@ def create_app(test_config=None):
         order = {'menor': 'p.precio ASC,p.id DESC', 'mayor': 'p.precio DESC,p.id DESC', 'novedades': 'p.destacado DESC,p.id DESC'}.get(sort, 'p.destacado DESC,p.id DESC')
         with db() as conn:
             products = conn.execute(f'''SELECT p.*, c.nombre categoria,
-                (SELECT archivo FROM catalogo_fotos f WHERE f.producto_id=p.id ORDER BY orden,id LIMIT 1) foto,
-                (SELECT COUNT(*) FROM catalogo_fotos f WHERE f.producto_id=p.id) fotos
+                COALESCE((SELECT archivo FROM catalogo_fotos f WHERE f.producto_id=p.id ORDER BY orden,id LIMIT 1),(SELECT url FROM catalogo_ml_fotos f WHERE f.producto_id=p.id ORDER BY orden,id LIMIT 1)) foto,
+                ((SELECT COUNT(*) FROM catalogo_fotos f WHERE f.producto_id=p.id)+(SELECT COUNT(*) FROM catalogo_ml_fotos f WHERE f.producto_id=p.id)) fotos
                 FROM catalogo_productos p JOIN catalogo_categorias c ON c.id=p.categoria_id
                 WHERE p.activo=1 AND (p.nombre LIKE ? OR p.descripcion LIKE ?)
                 AND (?='' OR CAST(p.categoria_id AS TEXT)=?) ORDER BY {order}''', (f'%{q}%', f'%{q}%', category, category)).fetchall()
-        return render_template('catalog.html', products=products, categories=categories(), query=q, category=category, sort=sort)
+        with db() as conn:
+            covers = conn.execute('SELECT * FROM catalogo_portadas WHERE activo=1 ORDER BY orden,id').fetchall()
+        slides = [{'src': url_for('photo', name=c['archivo']), 'titulo': c['titulo']} for c in covers]
+        if not slides:
+            slides = [{'src': url_for('static', filename='img/'+name+'.webp'), 'titulo': title} for name, title in [('chal','Detalles para una ocasión especial'),('blazer','Encaje que acompaña tu estilo'),('poncho','Un toque de color para destacar')]]
+        return render_template('catalog.html', slides=slides, products=products, categories=categories(), query=q, category=category, sort=sort)
 
     @app.get('/catalogo/producto/<int:product_id>')
     def product(product_id):
@@ -176,6 +208,8 @@ def create_app(test_config=None):
         with db() as conn:
             exists = conn.execute('''SELECT 1 FROM catalogo_fotos f JOIN catalogo_productos p
                 ON p.id=f.producto_id WHERE f.archivo=? AND (p.activo=1 OR ?=1)''', (name, int(bool(session.get('admin'))))).fetchone()
+            if not exists:
+                exists = conn.execute('SELECT 1 FROM catalogo_portadas WHERE archivo=? AND (activo=1 OR ?=1)', (name, int(bool(session.get('admin'))))).fetchone()
         if not exists:
             abort(404)
         return send_from_directory(uploads, name, max_age=86400)
@@ -204,7 +238,7 @@ def create_app(test_config=None):
     def admin():
         with db() as conn:
             products = conn.execute('''SELECT p.*, c.nombre categoria,
-                (SELECT archivo FROM catalogo_fotos f WHERE producto_id=p.id ORDER BY orden,id LIMIT 1) foto
+                COALESCE((SELECT archivo FROM catalogo_fotos f WHERE producto_id=p.id ORDER BY orden,id LIMIT 1),(SELECT url FROM catalogo_ml_fotos f WHERE producto_id=p.id ORDER BY orden,id LIMIT 1)) foto
                 FROM catalogo_productos p JOIN catalogo_categorias c ON c.id=p.categoria_id ORDER BY p.id DESC''').fetchall()
         return render_template('admin.html', products=products)
 
@@ -229,6 +263,85 @@ def create_app(test_config=None):
             return redirect(url_for('admin_categories'))
         return render_template('categories.html', categories=categories())
 
+    @app.route('/admin/portadas', methods=['GET', 'POST'])
+    @private
+    def covers():
+        staged = []
+        if request.method == 'POST':
+            try:
+                title = request.form.get('titulo', '').strip()
+                if len(title) > 100:
+                    raise ValueError('El texto de la portada admite hasta 100 caracteres.')
+                files = [f for f in request.files.getlist('fotos') if f.filename]
+                source_key = request.form.get('foto_producto', '')
+                remote_source = source_key.startswith('ml:')
+                source_id = int(source_key[3:] if remote_source else source_key) if source_key else None
+                with db() as conn:
+                    count = conn.execute('SELECT COUNT(*) FROM catalogo_portadas').fetchone()[0]
+                    source = conn.execute('SELECT url archivo FROM catalogo_ml_fotos WHERE id=?' if remote_source else 'SELECT archivo FROM catalogo_fotos WHERE id=?', (source_id,)).fetchone() if source_id else None
+                if source_id and not source:
+                    raise ValueError('La foto seleccionada ya no existe.')
+                if not files and not source:
+                    raise ValueError('Sube una foto o elige una foto de un producto.')
+                if count + len(files) + bool(source) > 10:
+                    raise ValueError('Puedes guardar hasta 10 fotos de portada. Quita alguna antes de agregar más.')
+                for upload in files:
+                    if len(upload.stream.read(6 * 1024 * 1024 + 1)) > 6 * 1024 * 1024:
+                        raise ValueError('Cada foto puede pesar hasta 6 MB.')
+                    upload.stream.seek(0)
+                    staged.append(guardar_foto(upload.stream, uploads))
+                if source:
+                    if remote_source:
+                        with descargar_foto(source['archivo']) as stream:
+                            staged.append(guardar_foto(stream, uploads))
+                    else:
+                        with (uploads / source['archivo']).open('rb') as stream:
+                            staged.append(guardar_foto(stream, uploads))
+                with db() as conn:
+                    maximum = conn.execute('SELECT COALESCE(MAX(orden),-1) FROM catalogo_portadas').fetchone()[0]
+                    for offset, filename in enumerate(staged, 1):
+                        conn.execute('INSERT INTO catalogo_portadas(archivo,titulo,orden) VALUES (?,?,?)', (filename, title, maximum + offset))
+                flash('Fotos agregadas a la portada.', 'success')
+            except (ValueError, sqlite3.Error, OSError) as error:
+                for filename in staged:
+                    (uploads / filename).unlink(missing_ok=True)
+                flash(str(error) if isinstance(error, ValueError) else 'No se pudieron guardar las fotos. Vuelve a intentarlo.', 'error')
+            return redirect(url_for('covers'))
+        with db() as conn:
+            items = conn.execute('SELECT * FROM catalogo_portadas ORDER BY orden,id').fetchall()
+            product_photos = conn.execute("SELECT CAST(f.id AS TEXT) id,f.archivo,p.nombre FROM catalogo_fotos f JOIN catalogo_productos p ON p.id=f.producto_id UNION ALL SELECT 'ml:' || f.id id,f.url archivo,p.nombre FROM catalogo_ml_fotos f JOIN catalogo_productos p ON p.id=f.producto_id ORDER BY nombre,id").fetchall()
+        return render_template('covers.html', covers=items, product_photos=product_photos)
+
+    @app.post('/admin/portada/<int:cover_id>/<action>')
+    @private
+    def manage_cover(cover_id, action):
+        if action not in {'guardar','subir','bajar','quitar'}:
+            abort(404)
+        with db() as conn:
+            items = conn.execute('SELECT * FROM catalogo_portadas ORDER BY orden,id').fetchall()
+            index = next((i for i,c in enumerate(items) if c['id'] == cover_id), None)
+            if index is None:
+                abort(404)
+            item = items[index]
+            if action == 'quitar':
+                conn.execute('DELETE FROM catalogo_portadas WHERE id=?', (cover_id,))
+            elif action == 'guardar':
+                title = request.form.get('titulo','').strip()
+                if len(title) > 100:
+                    flash('El texto admite hasta 100 caracteres.', 'error')
+                    return redirect(url_for('covers'))
+                conn.execute('UPDATE catalogo_portadas SET titulo=?,activo=? WHERE id=?', (title, int('activo' in request.form), cover_id))
+            else:
+                ordered = [c['id'] for c in items]
+                other = index + (-1 if action == 'subir' else 1)
+                if 0 <= other < len(ordered):
+                    ordered[index], ordered[other] = ordered[other], ordered[index]
+                    conn.executemany('UPDATE catalogo_portadas SET orden=? WHERE id=?', enumerate(ordered))
+        if action == 'quitar':
+            (uploads / item['archivo']).unlink(missing_ok=True)
+        flash('Portada actualizada.', 'success')
+        return redirect(url_for('covers'))
+
     @app.route('/admin/configuracion', methods=['GET', 'POST'])
     @private
     def configuration():
@@ -251,6 +364,10 @@ def create_app(test_config=None):
     @private
     def edit(product_id):
         item, photos = find_product(product_id) if product_id else (None, [])
+        with db() as conn:
+            linked = conn.execute('SELECT item_id FROM catalogo_ml_items WHERE producto_id=?', (product_id,)).fetchone() if product_id else None
+        if linked:
+            flash('Vinculado a Mercado Libre: la sincronización reemplaza nombre, descripción, precio, stock, enlace y estado. Aquí puedes organizar su categoría y destacado. Las fotos importadas se administran en Mercado Libre.', 'success')
         if request.method == 'GET':
             return render_template('edit.html', product=item, values=dict(item) if item else {'activo': 1}, photos=photos, categories=categories())
         values = request.form.to_dict()
@@ -259,11 +376,15 @@ def create_app(test_config=None):
         try:
             name = values.get('nombre', '').strip()
             description = values.get('descripcion', '').strip()
-            price, stock, category_id = int(values.get('precio', '')), int(values.get('stock', '')), int(values.get('categoria_id', ''))
+            price, stock = int(values.get('precio', '')), int(values.get('stock', ''))
+            new_category = values.get('nueva_categoria', '').strip()
+            category_id = int(values.get('categoria_id', '') or 0) if not new_category else None
             if not 1 <= len(name) <= 120 or len(description) > 4000 or not 0 <= price <= 999999999 or not 0 <= stock <= 999999:
                 raise ValueError('Revisa nombre, descripción, precio y stock. Usa números enteros sin puntos.')
-            if category_id not in {c['id'] for c in categories()}:
-                raise ValueError('Selecciona una categoría válida.')
+            if new_category and len(new_category) > 80:
+                raise ValueError('La nueva categoría puede tener hasta 80 caracteres.')
+            if not new_category and category_id not in {c['id'] for c in categories()}:
+                raise ValueError('Selecciona una categoría o escribe una nueva.')
             ml = values.get('enlace_ml', '').strip()
             if ml:
                 parts = urlsplit(ml)
@@ -282,6 +403,9 @@ def create_app(test_config=None):
                 with descargar_foto(url) as stream:
                     staged.append(guardar_foto(stream, uploads))
             with db() as conn:
+                if new_category:
+                    conn.execute('INSERT OR IGNORE INTO catalogo_categorias(nombre) VALUES (?)', (new_category,))
+                    category_id = conn.execute('SELECT id FROM catalogo_categorias WHERE nombre=? COLLATE NOCASE', (new_category,)).fetchone()['id']
                 fields = (name, description, price, stock, category_id, ml, values['activo'], values['destacado'])
                 if product_id:
                     conn.execute('''UPDATE catalogo_productos SET nombre=?,descripcion=?,precio=?,stock=?,categoria_id=?,enlace_ml=?,activo=?,destacado=? WHERE id=?''', (*fields, product_id))
@@ -324,19 +448,8 @@ def create_app(test_config=None):
         # Snapshot consistente de SQLite, incluidas las tablas de la práctica anterior.
         temporary = tempfile.TemporaryDirectory()
         try:
-            snapshot = Path(temporary.name) / 'practica.db'
-            with db() as source:
-                target = sqlite3.connect(snapshot)
-                try:
-                    source.backup(target)
-                finally:
-                    target.close()
             archive_path = Path(temporary.name) / 'respaldo_catalogo.zip'
-            with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as archive:
-                archive.write(snapshot, 'data/practica.db')
-                for file in uploads.iterdir():
-                    if file.is_file():
-                        archive.write(file, 'data/uploads/' + file.name)
+            make_backup(app.config['DATABASE'], uploads, archive_path)
             response = send_file(archive_path, as_attachment=True, download_name='respaldo_catalogo.zip', mimetype='application/zip')
             response.direct_passthrough = False
             response.call_on_close(temporary.cleanup)
@@ -344,6 +457,72 @@ def create_app(test_config=None):
         except Exception:
             temporary.cleanup()
             raise
+
+    @app.get('/admin/restaurar')
+    @private
+    def restore():
+        review = None
+        token = session.get('restore_token')
+        if token:
+            try:
+                review = load_review(data, token)['summary']
+            except ValueError as error:
+                session.pop('restore_token', None)
+                discard_stage(data, token)
+                flash(str(error), 'error')
+        return render_template('restore.html', review=review, backups=previous_backups(data))
+
+    @app.post('/admin/restaurar/revisar')
+    @private
+    def review_restore():
+        discard_stage(data, session.pop('restore_token', None))
+        upload = request.files.get('respaldo')
+        try:
+            if not upload or not upload.filename.lower().endswith('.zip'):
+                raise ValueError('Selecciona el ZIP generado con Descargar respaldo. No se admiten archivos RAR.')
+            upload.stream.seek(0, 2)
+            if upload.stream.tell() > MAX_ZIP:
+                raise ValueError('El archivo ZIP supera el límite de 100 MB.')
+            upload.stream.seek(0)
+            token, summary = review_backup(upload.stream, data)
+            session['restore_token'] = token
+            return redirect(url_for('restore'))
+        except ValueError as error:
+            flash(str(error), 'error')
+            return render_template('restore.html', review=None, backups=previous_backups(data)), 400
+
+    @app.post('/admin/restaurar/confirmar')
+    @private
+    def confirm_restore():
+        token = session.get('restore_token')
+        try:
+            if request.form.get('confirmar') != 'si':
+                raise ValueError('Marca la confirmación para reemplazar el catálogo actual.')
+            name, summary = apply_review(app.config['DATABASE'], data, token)
+            session.pop('restore_token', None)
+            flash(f"Restauración completada: {summary['productos']} productos y {summary['fotos']} fotos. La copia anterior está en Restaurar respaldo.", 'success')
+            return redirect(url_for('admin'))
+        except ValueError as error:
+            flash(str(error), 'error')
+            return redirect(url_for('restore'))
+        except (sqlite3.Error, OSError):
+            app.logger.warning('No se completó la restauración del catálogo.', exc_info=True)
+            flash('No se pudo restaurar. Los datos actuales se conservaron. Revisa el ZIP o vuelve a subirlo.', 'error')
+            return redirect(url_for('restore'))
+
+    @app.post('/admin/restaurar/cancelar')
+    @private
+    def cancel_restore():
+        discard_stage(data, session.pop('restore_token', None))
+        flash('Revisión cancelada. No se modificaron los productos.', 'success')
+        return redirect(url_for('restore'))
+
+    @app.get('/admin/respaldos/<name>')
+    @private
+    def previous_backup(name):
+        if not re.fullmatch(r'antes_\d{8}T\d{6}_[a-f0-9]{8}\.zip', name):
+            abort(404)
+        return send_from_directory(data / 'respaldos_automaticos', name, as_attachment=True)
 
     @app.get('/health')
     def health():
@@ -353,7 +532,7 @@ def create_app(test_config=None):
 
     @app.errorhandler(413)
     def large(error):
-        return render_template('error.html', message='La carga supera los 50 MB. Usa fotos de hasta 6 MB cada una.'), 413
+        return render_template('error.html', message='La carga supera el límite: 100 MB por respaldo ZIP o 50 MB para fotos de un producto.'), 413
 
     @app.errorhandler(429)
     def limited(error):
@@ -363,6 +542,8 @@ def create_app(test_config=None):
     def missing(error):
         return render_template('error.html', message='No encontramos esa página o el producto ya no está publicado.'), 404
 
+    from mercadolibre import install
+    install(app, db, private)
     return app
 
 

@@ -1,0 +1,17 @@
+{% extends 'admin_base.html' %}
+{% block admin_title %}Mercado Libre{% endblock %}
+{% block admin_content %}
+<section class="panel form-panel"><h2>Publica una vez, muestra en tu catálogo</h2><p>Importamos tus publicaciones de Chile y mostramos sus fotos desde Mercado Libre. La compra continúa en la publicación original.</p>
+{% if not ready %}<p class="message error">Faltan las variables ML_CLIENT_ID, ML_CLIENT_SECRET y ML_REDIRECT_URI en Render. Consulta CONECTAR_MERCADO_LIBRE.md. No pegues tus claves en este formulario.</p>{% endif %}
+<p><strong>Cuenta:</strong> {{ 'Conectada · vendedor ' + seller if connected else 'Sin conectar' }}</p>
+<form method="post" action="{{ url_for('meli.connect') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button dark" {% if not ready %}disabled{% endif %}>{{ 'Volver a autorizar cuenta' if connected else 'Conectar mi cuenta' }} ↗</button></form>
+<p class="field-hint">La autorización se realiza en Mercado Libre. Conecta siempre la misma cuenta chilena que usas para vender.</p>
+{% if connected %}<form method="post" action="{{ url_for('meli.sync') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button marketplace">Importar y actualizar productos →</button></form>{% endif %}
+</section>
+<section class="panel"><h2>Estado de sincronización</h2><p><strong>Publicaciones vinculadas:</strong> {{ imported }} · <strong>Pendientes:</strong> {{ pending }}</p><p><strong>Último producto actualizado:</strong> {{ last or 'Aún sin sincronizar' }}{% if last %} (UTC){% endif %}</p>{% if scanning %}<p>Buscando publicaciones para importar…</p>{% endif %}
+{% if error %}<p class="message error">{{ error }}</p>{% endif %}
+{% if failures %}<ul>{% for f in failures %}<li>{{ f.item_id }}: {{ f.error }}</li>{% endfor %}</ul>{% endif %}
+<a class="button outline small" href="{{ url_for('meli.dashboard') }}">Actualizar estado ↻</a>
+<p class="field-hint">Los avisos se procesan en segundo plano con reintentos. Si falta un cambio, usa Importar y actualizar productos. Render gratuito se duerme y puede perder datos al reiniciar o desplegar.</p></section>
+<section class="panel"><h2>Qué se actualiza</h2><p>Nombre, descripción, precio en CLP, disponibilidad, enlace, fotos y estado de la publicación. Las publicaciones pausadas o cerradas se ocultan del catálogo.</p><p>Los productos nuevos se agregan a la categoría Mercado Libre. Puedes cambiar su categoría y destacado desde Productos; esos dos campos se conservan al sincronizar. Los productos manuales se mantienen separados.</p><p>Los productos que ya habías copiado manualmente no se enlazan automáticamente: pueden coexistir con los importados. Oculta la copia manual después de revisar el resultado.</p><p>Las fotos remotas dependen de Mercado Libre. Para elegir una para la portada, abre Fotos de portada: allí se guarda una copia local independiente.</p></section>
+{% endblock %}

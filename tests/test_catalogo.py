@@ -111,6 +111,34 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(list((self.data/'uploads').iterdir()),[])
         self.assertEqual(self.client.post('/admin/producto/nuevo',data=self.values(token,fotos=[(image(),str(i)+'.png') for i in range(9)])).status_code,400)
 
+    def test_create_category_while_saving_product(self):
+        token=self.login()
+        response=self.client.post('/admin/producto/nuevo',data=self.values(token,categoria_id='',nueva_categoria='Chales de fiesta'))
+        self.assertEqual(response.status_code,302)
+        with sqlite3.connect(self.data/'practica.db') as conn:
+            category_id=conn.execute("SELECT id FROM catalogo_categorias WHERE nombre='Chales de fiesta'").fetchone()[0]
+            self.assertEqual(conn.execute('SELECT categoria_id FROM catalogo_productos').fetchone()[0],category_id)
+        self.assertIn('Chal plateado',self.client.get(f'/catalogo?categoria={category_id}').get_data(as_text=True))
+        self.client.post('/admin/producto/nuevo',data=self.values(token,categoria_id='',nueva_categoria='chales de fiesta'))
+        with sqlite3.connect(self.data/'practica.db') as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM catalogo_categorias').fetchone()[0],4)
+        response=self.client.post('/admin/producto/nuevo',data=self.values(token,categoria_id='',nueva_categoria='No crear',fotos=[(io.BytesIO(b'bad'),'bad.png')]))
+        self.assertEqual(response.status_code,400)
+        with sqlite3.connect(self.data/'practica.db') as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM catalogo_categorias WHERE nombre='No crear'").fetchone()[0],0)
+
+    def test_carousel_and_direct_purchase_markup(self):
+        token=self.login()
+        self.client.post('/admin/producto/nuevo',data=self.values(token,enlace_ml='https://www.mercadolibre.cl/test',fotos=[(image(),'a.png'),(image(),'b.png')]))
+        home=self.client.get('/catalogo').get_data(as_text=True)
+        self.assertIn('Comprar en Mercado Libre',home)
+        self.assertIn('data-autoplay="5000"',home)
+        self.assertIn('Cómo comprar',home)
+        detail=self.client.get('/catalogo/producto/1').get_data(as_text=True)
+        self.assertIn('data-autoplay="5500"',detail)
+        self.assertIn('Pausar cambio automático',detail)
+        self.assertIn('Foto siguiente',detail)
+
     def test_remote_photos_and_backup(self):
         token=self.login()
         with patch('app.descargar_foto',return_value=image()):

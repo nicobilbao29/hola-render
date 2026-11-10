@@ -85,7 +85,7 @@ En Render gratuito puedes probar el catálogo, pero los datos y fotos cargados s
 
 Para conservarlos al desplegar o reiniciar, usa un servicio pagado con un disco persistente en `/var/data` y añade `DATA_DIR=/var/data`. El programa usará `/var/data/practica.db` y `/var/data/uploads/` automáticamente. No cambies esta ruta después de cargar datos sin planificar el traslado. El disco es de una sola instancia; puede haber una interrupción breve en cada despliegue.
 
-Antes de cambiar de ubicación o publicar datos importantes, descarga un respaldo desde el panel. El respaldo incluye `data/practica.db` y `data/uploads`. Guarda una copia fuera de Render. Para restaurar localmente, detén Flask, conserva una copia de la carpeta actual y coloca el contenido de `data/` del respaldo dentro de tu DATA_DIR. En producción, la restauración exige acceso al disco del servicio y debe hacerse con la aplicación detenida para evitar reemplazar escrituras en curso. No hay importación de respaldos desde el navegador en esta versión.
+Antes de cambiar de ubicación o publicar datos importantes, descarga un respaldo desde el panel. El respaldo incluye `data/practica.db` y `data/uploads`. Guarda una copia fuera de Render. Para restaurar localmente, detén Flask, conserva una copia de la carpeta actual y coloca el contenido de `data/` del respaldo dentro de tu DATA_DIR. En producción, la restauración exige acceso al disco del servicio y debe hacerse con la aplicación detenida para evitar reemplazar escrituras en curso. Esta versión incluye restauración del catálogo desde Administrar → Restaurar respaldo; consulta el apartado siguiente. Para una restauración manual del archivo completo conserva las precauciones de detener la aplicación.
 
 El despliegue inicial de esta actualización puede perder los registros de la práctica en Render Free por el funcionamiento del alojamiento, aunque este código no borra las tablas. Guarda previamente cualquier registro de la práctica que necesites conservar. En el computador, los registros existentes se mantienen en el mismo archivo.
 
@@ -107,3 +107,116 @@ El despliegue inicial de esta actualización puede perder los registros de la pr
 Se incluyen pruebas del acceso privado, CSRF, conservación de la tabla anterior, categorías, varias fotos, portada, eliminación de fotos, filtros, productos ocultos, validación de enlaces, enlaces de WhatsApp y descarga de respaldo. Ejecuta `python -m unittest discover -s tests -v` si necesitas verificar cambios posteriores.
 
 La portada y la estructura adaptable se implementaron con CSS. La vista local no fue accesible desde el navegador remoto usado para revisar esta entrega; comprueba el aspecto en tu navegador al ejecutar el proyecto. Las importaciones de imágenes remotas se prueban con respuestas simuladas; no se garantiza que Mercado Libre permita descargar cada enlace.
+
+
+## 8. Restaurar el catálogo desde la propia página
+
+### Instalar esta actualización
+
+Antes de desplegar cambios en Render Free, descarga un respaldo actual y guárdalo en tu computador. Publicar la actualización puede renovar el almacenamiento temporal.
+
+Detén Flask y copia solamente estos cuatro archivos desde la versión nueva a tu proyecto actual:
+
+- `app.py` (reemplazar).
+- `respaldos.py` (nuevo; va junto a app.py).
+- `templates/admin_base.html` (reemplazar).
+- `templates/restore.html` (nuevo).
+
+Conserva `.env`, `.venv`, `.git` y `data`. No vuelvas a ejecutar configurar.py: tu contraseña sigue funcionando. No hay nuevas dependencias. También puedes actualizar esta guía y las pruebas.
+
+Para probar localmente, ejecuta `python app.py` o el comando Flask con puerto 5001 que estabas usando. Luego inicia sesión y entra a Restaurar respaldo.
+
+Para publicar:
+
+```powershell
+git add app.py respaldos.py templates/admin_base.html templates/restore.html
+git commit -m "Agregar restauración de respaldos del catálogo"
+git push
+```
+
+En Render, para dar margen a las restauraciones, el comando de inicio puede ser:
+
+```text
+gunicorn --workers 1 --threads 4 --timeout 120 app:app
+```
+
+### Usar Restaurar respaldo
+
+1. Entra al panel publicado con tu contraseña.
+2. Pulsa Restaurar respaldo.
+3. Selecciona el archivo ZIP original generado por Descargar respaldo. No lo descomprimas ni lo conviertas en RAR. Se admiten respaldos descargados antes de esta actualización.
+4. Pulsa Revisar respaldo. Se validan las tablas, relaciones y fotos, y se muestran sus cantidades. Esta revisión aún no cambia el catálogo.
+5. Marca que entiendes el reemplazo y pulsa Confirmar y restaurar. Puedes cancelar antes de confirmar.
+6. Abre el catálogo y comprueba los productos y fotos recuperados.
+
+Restaura productos, categorías, galería y configuración del negocio (incluido WhatsApp). Reemplaza esos datos; no mezcla productos nuevos con los anteriores. No cambia contraseñas, SECRET_KEY ni `.env`. No restaura tablas ajenas al catálogo, como `personas`: las que ya existan en destino se conservan. Aunque el ZIP incluye el archivo SQLite completo para análisis y respaldo, la importación web acepta únicamente las cuatro tablas conocidas del catálogo y no ejecuta SQL del ZIP.
+
+Antes de reemplazar los datos, crea un ZIP automático del estado actual en `DATA_DIR/respaldos_automaticos`. Se puede descargar desde la misma pantalla para restaurarlo si quieres volver atrás. Las copias están en el mismo servicio; descárgalas fuera de Render para conservarlas. Se muestran las últimas diez y no se eliminan automáticamente. Su acumulación ocupa disco.
+
+Límites: 100 MB por ZIP, 300 MB descomprimidos, base de hasta 32 MB, hasta 5.000 productos y 16.000 fotos en total, máximo 8 por producto. La revisión vence a los 30 minutos. Si una copia supera esos límites requiere un traslado manual. Las fotos se validan y optimizan nuevamente, por lo que sus nombres internos pueden cambiar sin alterar los productos. No reemplaces manualmente archivos mientras se esté restaurando.
+
+Si hay errores de validación, falta una foto o falla la escritura antes de terminar, el catálogo anterior se conserva. Las operaciones de administración se coordinan con un bloqueo de archivos entre procesos, y el reemplazo de las tablas usa una transacción. Los lectores ven el estado anterior o el nuevo; una pestaña abierta con imágenes anteriores puede requerir recargar después de restaurar.
+
+**Render gratuito:** la función funciona, pero los datos restaurados y las copias automáticas siguen siendo temporales. Restaurar un ZIP no añade persistencia al servicio. Para conservarlos al reiniciar o desplegar usa disco persistente y `DATA_DIR=/var/data`.
+
+## 9. Categorías, carruseles y presentación de productos
+
+Esta actualización no modifica el esquema de la base de datos. Los respaldos anteriores del catálogo siguen siendo compatibles.
+
+- Puedes crear categorías desde Administrar → Categorías, desde el botón Nueva categoría del listado, o dentro del formulario de producto desplegando “Crear una categoría nueva”. Si ya existe, se utiliza la categoría existente. Se guarda junto con el producto, solo si el formulario es válido.
+- La portada muestra tres imágenes en un carrusel que cambia cada 5 segundos. Puedes usar flechas, puntos y el botón de pausa. Sus archivos siguen en `static/img/chal.webp`, `blazer.webp` y `poncho.webp`.
+- La galería del producto cambia cada 5,5 segundos cuando hay más de una foto. Las miniaturas y flechas permiten elegir una imagen; una selección manual pausa el cambio automático. Reproducir lo activa nuevamente. Con una sola foto se muestra una imagen fija.
+- Los carruseles pausan con el foco, el puntero o al ocultar la pestaña. Si el navegador tiene la preferencia de movimiento reducido, comienzan pausados.
+- Las fotos de las tarjetas y el detalle se muestran dentro de marcos uniformes de proporción 4:5, centradas y sin estirar ni recortar la prenda. Las tarjetas mantienen precios y botones alineados aunque los títulos tengan distinto largo. La portada recorta sus fotos de forma decorativa; no altera los archivos de los productos.
+- Las tarjetas con un enlace de Mercado Libre ahora muestran “Comprar en Mercado Libre” directamente. Ese botón abre la publicación; no agrega un sistema de pagos propio. Si está agotado, dice “Ver en Mercado Libre”. El detalle conserva el contacto por WhatsApp.
+- La sección Cómo comprar explica el proceso. No se añadieron reseñas, certificaciones, sellos ni promesas de entrega que no estén comprobados.
+
+### Actualizar esta versión
+
+Descarga un respaldo antes de publicar, especialmente si usas Render gratuito. Copia a tu proyecto los archivos `app.py`, `templates/catalog.html`, `templates/product.html`, `templates/edit.html`, `templates/admin.html`, `templates/base.html`, `static/app.js` y `static/style.css`. Conserva los demás archivos de restauración de la versión anterior (`respaldos.py`, `templates/restore.html`, `templates/admin_base.html`) o copia el proyecto completo del ZIP conservando tu `.env`, `.venv`, `.git` y `data`.
+
+No necesitas volver a configurar la contraseña ni instalar nuevas dependencias.
+
+```powershell
+git add app.py templates/ static/
+git commit -m "Mejorar categorías, carruseles y diseño del catálogo"
+git push
+```
+
+Tras el despliegue, actualiza la página con Ctrl+F5 si tu navegador muestra el diseño anterior. Las pruebas funcionales verifican categorías, enlaces y HTML del carrusel; revisa también su aspecto y comportamiento desde el navegador y celular que utilices.
+
+## 10. Elegir las fotos de la página principal
+
+Entra a `/admin` con tu contraseña y abre **Fotos de portada**.
+
+1. Sube una o varias imágenes desde tu computador, o elige una foto de un producto usando las miniaturas o el selector.
+2. Escribe un texto opcional y pulsa **Agregar a la portada**.
+3. Usa **Subir** y **Bajar** para cambiar el orden.
+4. Marca o desmarca **Mostrar en la página principal** y pulsa **Guardar cambios**. También puedes editar el texto o quitar una foto.
+5. Abre **Ver página principal** para comprobar el resultado.
+
+Hasta 10 fotos de portada, JPG/PNG/WEBP de hasta 6 MB cada una. Las visibles cambian cada 5 segundos. Con una foto, la portada queda fija. Si no hay fotos visibles, vuelven las tres fotos de ejemplo. Una foto elegida de un producto se copia: quitarla del producto no rompe la portada.
+
+Los respaldos ZIP incluyen las portadas, sus textos, orden y visibilidad. Los respaldos anteriores a esta función también se pueden restaurar; como no tienen portadas personalizadas, se mostrarán las fotos de ejemplo.
+
+### Actualizar tu proyecto existente
+
+Antes de actualizar Render gratuito, descarga un respaldo desde el panel: un despliegue puede borrar sus datos temporales.
+
+Detén Flask con Ctrl+C. Copia los archivos del ZIP dentro de tu carpeta de proyecto actual, reemplazando los archivos de código. Conserva `.env`, `.venv`, `.git` y `data` de tu proyecto. No necesitas ejecutar configurar.py otra vez ni borrar la base de datos. Al iniciar, se crea automáticamente la nueva tabla catalogo_portadas sin borrar las tablas existentes.
+
+Archivos de esta mejora: app.py, respaldos.py, templates/covers.html, templates/catalog.html, templates/admin_base.html, templates/restore.html, static/app.js y static/style.css.
+
+Ejecuta `python app.py`. Entra a administración y revisa Fotos de portada. Para publicar, desde tu carpeta conectada a GitHub:
+
+```powershell
+git add app.py respaldos.py templates/ static/ LEEME_CATALOGO.md tests/
+git commit -m "Agregar menu para administrar fotos de portada"
+git push origin main
+```
+
+En Render gratuito, restaura el respaldo desde el panel si los datos se pierden al desplegar. Las fotos de portada también necesitan almacenamiento persistente para mantenerse entre reinicios sin restauración manual.
+
+## 11. Conexión con Mercado Libre
+
+Esta versión agrega el menú **Mercado Libre** con autorización OAuth PKCE, importación de publicaciones chilenas y actualización por avisos del tópico items. Las fotos de las publicaciones se muestran desde Mercado Libre; los productos manuales y fotos locales se mantienen separados. La configuración completa y los pasos para Render están en **CONECTAR_MERCADO_LIBRE.md**. Las pruebas de la integración utilizan una API simulada; falta autorizar tu cuenta para comprobar el acceso real.
