@@ -100,15 +100,18 @@ def read_catalog(database):
             raise ValueError('La base contiene estructuras no compatibles con este catálogo.')
         if connection.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise ValueError('La base de datos está dañada.')
+        from reportes import TABLES
         rows = {}
-        for table, columns in COLUMNS.items():
+        for table, columns in {**COLUMNS, **TABLES}.items():
+            if table in TABLES and not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
+                continue
             actual = tuple(row['name'] for row in connection.execute(f'PRAGMA table_info({table})'))
             if table in {'catalogo_portadas','catalogo_ml_items','catalogo_ml_fotos'} and not actual:
                 rows[table] = []  # Compatibilidad con respaldos anteriores al menú de portadas.
                 continue
             if actual != columns:
                 raise ValueError('El respaldo no corresponde a esta versión del catálogo.')
-            limit = 16000 if table in {'catalogo_fotos','catalogo_ml_fotos'} else 5000
+            limit = 100000 if table in TABLES else (16000 if table in {'catalogo_fotos','catalogo_ml_fotos'} else 5000)
             result = connection.execute(f'SELECT * FROM {table} LIMIT ?', (limit + 1,)).fetchall()
             if len(result) > limit:
                 raise ValueError('El respaldo supera la cantidad de registros admitida.')
@@ -186,6 +189,8 @@ def validate_rows(rows):
         remote_counts[photo['producto_id']] = remote_counts.get(photo['producto_id'],0) + 1
         if remote_counts[photo['producto_id']] > 50:
             raise ValueError('La publicación supera las 50 fotos remotas.')
+    from reportes import validate_backup
+    validate_backup(rows)
     config = {r['clave']:r['valor'] for r in rows['catalogo_configuracion']}
     if set(config) != {'nombre','descripcion','whatsapp'} or len(config) != len(rows['catalogo_configuracion']) or not text(config['nombre'],60,1) or not text(config['descripcion'],220) or not isinstance(config['whatsapp'],str) or (config['whatsapp'] and not re.fullmatch(r'[1-9][0-9]{7,14}',config['whatsapp'])):
         raise ValueError('La configuración del catálogo no es válida.')
@@ -233,7 +238,7 @@ def review_backup(stream, data):
                     raise ValueError('Una foto del respaldo supera los 6 MB.')
                 with archive.open(member) as source:
                     photo['archivo'] = guardar_foto(source, folder / 'fotos')
-        summary = {'productos':len(rows['catalogo_productos']), 'categorias':len(rows['catalogo_categorias']), 'fotos':len(rows['catalogo_fotos']), 'portadas':len(rows.get('catalogo_portadas', [])), 'fotos_ml':len(rows.get('catalogo_ml_fotos', [])), 'publicaciones_ml':len(rows.get('catalogo_ml_items', [])), 'nombre':dict((r['clave'],r['valor']) for r in rows['catalogo_configuracion'])['nombre']}
+        summary = {'ventas':len(rows.get('negocio_ventas',[])), 'gastos':len(rows.get('negocio_gastos',[])), 'incluye_reportes':'negocio_ventas' in rows, 'productos':len(rows['catalogo_productos']), 'categorias':len(rows['catalogo_categorias']), 'fotos':len(rows['catalogo_fotos']), 'portadas':len(rows.get('catalogo_portadas', [])), 'fotos_ml':len(rows.get('catalogo_ml_fotos', [])), 'publicaciones_ml':len(rows.get('catalogo_ml_items', [])), 'nombre':dict((r['clave'],r['valor']) for r in rows['catalogo_configuracion'])['nombre']}
         manifest = {'rows':rows,'summary':summary,'created':time.time()}
         (folder / 'revision.json').write_text(json.dumps(manifest,ensure_ascii=False),encoding='utf-8')
         return token, summary
@@ -308,12 +313,22 @@ def apply_review(database, data, token):
                 shutil.copyfileobj(source,target)
         conn.execute('BEGIN IMMEDIATE')
         original_files = [r[0] for r in conn.execute('SELECT archivo FROM catalogo_fotos UNION SELECT archivo FROM catalogo_portadas')]
+        from reportes import TABLES
+        financial_order=('negocio_ventas','negocio_lineas','negocio_envios','negocio_costos','negocio_gastos','catalogo_metricas','negocio_envio_detalle','negocio_flex_cargos','negocio_flex_control')
+        for table in reversed(financial_order):
+            if table in rows:
+                conn.execute(f'DELETE FROM {table}')
         for table in ('catalogo_ml_fotos','catalogo_ml_items','catalogo_portadas','catalogo_fotos','catalogo_productos','catalogo_categorias','catalogo_configuracion'):
             conn.execute(f'DELETE FROM {table}')
         for table in ('catalogo_categorias','catalogo_productos','catalogo_fotos','catalogo_configuracion','catalogo_portadas','catalogo_ml_items','catalogo_ml_fotos'):
             columns = COLUMNS[table]
             placeholders = ','.join('?' for _ in columns)
             conn.executemany(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})", [[row[c] for c in columns] for row in rows.get(table, [])])
+        for table in financial_order:
+            if table in rows:
+                columns=TABLES[table]
+                placeholders=','.join('?' for _ in columns)
+                conn.executemany(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})",[[row[c] for c in columns] for row in rows[table]])
         if conn.execute('PRAGMA foreign_key_check').fetchone():
             raise ValueError('Hay relaciones de datos inconsistentes. No se aplicó la restauración.')
         conn.commit()

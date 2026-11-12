@@ -61,8 +61,10 @@ class CatalogTest(unittest.TestCase):
         response = self.client.post('/admin/producto/nuevo', data=self.values(token, enlace_ml='https://www.mercadolibre.cl/test', fotos=[(image(),'1.png'),(image('blue'),'2.png')]))
         self.assertEqual(response.status_code,302)
         html = self.client.get('/catalogo/producto/1').get_data(as_text=True)
-        self.assertIn('https://wa.me/56912345678?',html)
-        self.assertIn('https://www.mercadolibre.cl/test',html)
+        self.assertIn('/ir/1/wa',html)
+        self.assertTrue(self.client.get('/ir/1/wa').location.startswith('https://wa.me/56912345678?'))
+        self.assertIn('/ir/1/ml',html)
+        self.assertEqual(self.client.get('/ir/1/ml').location,'https://www.mercadolibre.cl/test')
         self.assertEqual(html.count('data-gallery-src='),2)
         with sqlite3.connect(self.data/'practica.db') as conn:
             photos=conn.execute('SELECT id,archivo FROM catalogo_fotos ORDER BY id').fetchall()

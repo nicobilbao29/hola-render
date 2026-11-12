@@ -43,12 +43,14 @@ def photo_url(value):
     return None
 
 
-def api_request(path, token=None, form=None):
+def api_request(path, token=None, form=None, extra_headers=None):
     if not path.startswith('/') or path.startswith('//'):
         raise MeliError('Recurso de Mercado Libre no válido.')
     headers = {'Accept':'application/json','User-Agent':'YAProductosCatalogo/2.0'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
+    if extra_headers:
+        headers.update(extra_headers)
     body = urlencode(form).encode() if form is not None else None
     if body is not None:
         headers['Content-Type'] = 'application/x-www-form-urlencoded'
@@ -63,7 +65,7 @@ def api_request(path, token=None, form=None):
             return value
     except HTTPError as error:
         # No guardar cuerpos, códigos OAuth ni tokens en mensajes o registros.
-        messages={400:'Mercado Libre rechazó la solicitud. Revisa la configuración o vuelve a conectar la cuenta.',401:'La autorización venció o fue revocada. Vuelve a conectar tu cuenta.',403:'Mercado Libre rechazó el acceso. Revisa los permisos de Usuarios y Publicación y sincronización.',404:'La publicación ya no está disponible en Mercado Libre.',429:'Mercado Libre limitó las consultas. Se volverá a intentar más tarde.'}
+        messages={400:'Mercado Libre rechazó la solicitud. Revisa la configuración o vuelve a conectar la cuenta.',401:'La autorización venció o fue revocada. Vuelve a conectar tu cuenta.',403:'Mercado Libre rechazó el acceso. Revisa los permisos de la aplicación; activa Venta y envíos para órdenes y Facturación de una venta para movimientos Flex; vuelve a autorizar la misma cuenta.',404:'La publicación ya no está disponible en Mercado Libre.',429:'Mercado Libre limitó las consultas. Se volverá a intentar más tarde.'}
         raise MeliError(messages.get(error.code,'Mercado Libre no respondió correctamente. Se volverá a intentar.'), error.code) from None
     except (URLError, OSError, TimeoutError, json.JSONDecodeError) as error:
         raise MeliError('No se pudo consultar Mercado Libre. Reintenta en unos minutos.') from None
@@ -239,6 +241,9 @@ def install(app, db, private):
     def process_tick():
         if not configured() or not get('refresh'):
             return False
+        reports=app.extensions.get('reportes')
+        if reports and reports['tick']():
+            return True
         if get('scan_requested')=='1' and float(get('scan_retry','0'))<=time.time():
             try:
                 scan()
@@ -380,6 +385,8 @@ def install(app, db, private):
                         c.execute('ATTACH DATABASE ? AS ml_private',(str(internal),))
                         c.execute('UPDATE catalogo_productos SET activo=0 WHERE id IN (SELECT producto_id FROM catalogo_ml_items)')
                         c.execute('DELETE FROM ml_private.pendientes')
+                        if app.extensions.get('reportes'):
+                            c.execute('DELETE FROM ml_private.reportes_pendientes')
                         c.execute('DELETE FROM ml_private.estado')
                         c.execute("INSERT INTO ml_private.estado VALUES ('generation',?)",(generation,))
             session.pop('ml_oauth',None)
@@ -416,6 +423,8 @@ def install(app, db, private):
         # autenticada a la API. Nunca se descarga body.resource como URL libre.
         if str(body.get('application_id'))!=str(app.config['ML_CLIENT_ID']):
             return {'error':'aplicacion no autorizada'},403
+        if body.get('topic') in ('orders','orders_v2','shipments') and app.extensions.get('reportes'):
+            return app.extensions['reportes']['notification'](body)
         if body.get('topic')!='items':
             return {'estado':'ignorado'}
         resource=body.get('resource','')

@@ -108,7 +108,7 @@ def create_app(test_config=None):
             actual = request.form.get('csrf_token', '')
             if not expected or not secrets.compare_digest(actual, expected):
                 abort(400, 'La sesión venció. Recarga la página y vuelve a intentarlo.')
-        if (request.method == 'POST' and request.endpoint != 'meli.disconnect') or request.endpoint == 'backup':
+        if (request.method == 'POST' and request.endpoint not in ('meli.disconnect','reportes.sync')) or request.endpoint == 'backup':
             try:
                 g.storage_lock = StorageLock(data / '.catalogo.lock').acquire()
             except TimeoutError:
@@ -544,6 +544,8 @@ def create_app(test_config=None):
 
     from mercadolibre import install
     install(app, db, private)
+    from reportes import install as install_reportes
+    install_reportes(app, db, private, wa_link, limiter)
     return app
 
 
