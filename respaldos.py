@@ -28,6 +28,7 @@ COLUMNS = {
     'catalogo_portadas': ('id', 'archivo', 'titulo', 'orden', 'activo'),
     'catalogo_ml_items': ('item_id','producto_id','seller_id','estado','actualizado'),
     'catalogo_ml_fotos': ('id','producto_id','url','orden'),
+    'catalogo_ml_clasificacion': ('item_id','seller_id','auto_categoria_id','manual','categoria_ml','ruta_ml','origen','actualizado'),
 }
 
 
@@ -106,7 +107,7 @@ def read_catalog(database):
             if table in TABLES and not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
                 continue
             actual = tuple(row['name'] for row in connection.execute(f'PRAGMA table_info({table})'))
-            if table in {'catalogo_portadas','catalogo_ml_items','catalogo_ml_fotos'} and not actual:
+            if table in {'catalogo_portadas','catalogo_ml_items','catalogo_ml_fotos','catalogo_ml_clasificacion'} and not actual:
                 rows[table] = []  # Compatibilidad con respaldos anteriores al menú de portadas.
                 continue
             if actual != columns:
@@ -189,6 +190,9 @@ def validate_rows(rows):
         remote_counts[photo['producto_id']] = remote_counts.get(photo['producto_id'],0) + 1
         if remote_counts[photo['producto_id']] > 50:
             raise ValueError('La publicación supera las 50 fotos remotas.')
+    for r in rows.get('catalogo_ml_clasificacion',[]):
+        if r['item_id'] not in linked_ids or not isinstance(r['seller_id'],str) or not re.fullmatch(r'[0-9]{1,25}',r['seller_id']) or r['auto_categoria_id'] not in ids or type(r['manual']) is not int or r['manual'] not in (0,1) or not text(r['categoria_ml'],30) or (r['categoria_ml'] and not re.fullmatch(r'MLC[0-9]{1,20}',r['categoria_ml'])) or not text(r['ruta_ml'],1000) or r['origen'] not in ('manual','titulo','mercadolibre','pendiente') or not text(r['actualizado'],64,1):
+            raise ValueError('La clasificación automática del respaldo no es válida.')
     from reportes import validate_backup
     validate_backup(rows)
     config = {r['clave']:r['valor'] for r in rows['catalogo_configuracion']}
@@ -318,9 +322,9 @@ def apply_review(database, data, token):
         for table in reversed(financial_order):
             if table in rows:
                 conn.execute(f'DELETE FROM {table}')
-        for table in ('catalogo_ml_fotos','catalogo_ml_items','catalogo_portadas','catalogo_fotos','catalogo_productos','catalogo_categorias','catalogo_configuracion'):
+        for table in ('catalogo_ml_clasificacion','catalogo_ml_fotos','catalogo_ml_items','catalogo_portadas','catalogo_fotos','catalogo_productos','catalogo_categorias','catalogo_configuracion'):
             conn.execute(f'DELETE FROM {table}')
-        for table in ('catalogo_categorias','catalogo_productos','catalogo_fotos','catalogo_configuracion','catalogo_portadas','catalogo_ml_items','catalogo_ml_fotos'):
+        for table in ('catalogo_categorias','catalogo_productos','catalogo_fotos','catalogo_configuracion','catalogo_portadas','catalogo_ml_items','catalogo_ml_fotos','catalogo_ml_clasificacion'):
             columns = COLUMNS[table]
             placeholders = ','.join('?' for _ in columns)
             conn.executemany(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})", [[row[c] for c in columns] for row in rows.get(table, [])])

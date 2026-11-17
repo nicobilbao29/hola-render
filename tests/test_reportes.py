@@ -40,6 +40,53 @@ class ReportesTest(unittest.TestCase):
         for bad in ('NaN','Infinity','-1','1.000.000'):
             with self.assertRaises(ValueError):money(bad)
 
+    def test_new_shipping_format_reads_origin_and_keeps_decimal_charge(self):
+        self.setup_sales();self.import_one()
+        with patch('reportes.api_request',side_effect=[{'id':700,'origin':{'sender_id':123},'logistic':{'type':'drop_off'}},
+            {'senders':[{'user_id':999,'cost':9000},{'user_id':123,'cost':'1039.50'}],'receiver':{'cost':4900}}]):
+            self.r['import_shipping']('700')
+        self.assertEqual(self.result()['shipping'],103950)
+        for shipment in ({'id':700,'origin':{'sender_id':999}}, {'id':700,'sender_id':123,'origin':{'sender_id':999}}):
+            with patch('reportes.api_request',return_value=shipment):
+                with self.assertRaises(ValueError):self.r['import_shipping']('700')
+        self.assertEqual(self.result()['shipping'],103950)
+
+    def test_five_card_profit_matches_sale_less_fees_dispatch_and_cost(self):
+        self.setup_sales();self.import_one();token=self.login()
+        self.assertIsNone(self.result()['profit'])
+        self.shipping()
+        self.client.post('/admin/costos',data={'csrf_token':token,'producto':'MLC123456789|99','costo':'1000','aplicar':'si'})
+        expected=1998000-200150-250000-200000
+        r=self.result();self.assertEqual(r['profit'],expected)
+        self.assertEqual(r['sale_details'][0]['ganancia_venta'],expected)
+        self.client.post('/admin/gastos',data={'csrf_token':token,'fecha':'2026-11-01','categoria':'Otros','descripcion':'Servidor','monto':'500'})
+        r=self.result();self.assertEqual(r['profit'],expected);self.assertEqual(r['result'],expected-50000)
+        html=self.client.get('/admin/reportes?desde=2026-11-01&hasta=2026-11-30').get_data(as_text=True)
+        for label in ('Venta total','Comisión Mercado Libre','Cargo por despacho','Costo de mercadería','Ganancia de las ventas'):
+            self.assertIn(label,html)
+
+    def test_shipping_retry_is_private_scoped_and_does_not_call_api_in_request(self):
+        self.setup_sales();self.import_one();token=self.login()
+        with sqlite3.connect(self.data/'practica.db') as c:
+            c.execute("INSERT INTO negocio_ventas VALUES ('2002','999','2026-11-01','paid','CLP',10000,1000,'999','now')")
+        with self.ml['state_db']() as c:
+            c.execute("UPDATE reportes_pendientes SET error='El envío no pertenece al vendedor conectado.',proximo=9999999999")
+        self.assertEqual(self.client.post('/admin/reportes/envios/actualizar').status_code,400)
+        with patch('reportes.api_request') as api:
+            response=self.client.post('/admin/reportes/envios/actualizar',data={'csrf_token':token,'desde':'2026-11-01','hasta':'2026-11-30'})
+            self.assertEqual(response.status_code,302);api.assert_not_called()
+        with self.ml['state_db']() as c:
+            jobs=c.execute("SELECT * FROM reportes_pendientes WHERE tipo='envio'").fetchall()
+            self.assertEqual([r['recurso'] for r in jobs],['700']);self.assertEqual(jobs[0]['error'],'');self.assertEqual(jobs[0]['proximo'],0)
+        self.assertEqual(self.app.test_client().get('/admin/reportes/venta/1001').status_code,302)
+
+    def test_flex_simple_profit_excludes_bonuses_and_requires_carrier(self):
+        self.prepare_flex()
+        r=self.result();self.assertIsNotNone(r['profit']);self.assertIsNone(r['result'])
+        self.billing_page([self.flex_movement()]);self.billing_page([],doc='CREDIT_NOTE')
+        after=self.result();self.assertEqual(after['profit'],r['profit'])
+        self.assertEqual(after['result'],after['profit']+300000)
+
     def test_unknown_cost_not_zero_idempotence_and_historic_cost(self):
         self.setup_sales();self.import_one();self.import_one()
         r=self.result();self.assertEqual(len(r['sales']),1);self.assertEqual(r['units'],2);self.assertEqual(r['fees'],200150);self.assertIsNone(r['result']);self.assertEqual(r['missing_cost'],2)

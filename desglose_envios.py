@@ -68,7 +68,7 @@ def economic_details(c,seller,sales,all_paid):
             complete=complete and documents=={'BILL','CREDIT_NOTE'}
         if complete and all(r['estado']=='PROCESSED' for r in movements):
             credits[ship]=sum(r['importe'] if r['tipo']=='BONUS' else -r['importe'] for r in movements)
-    parts={}; totals=dict(regular=0,carrier=0,credit=0,missing_flex=0,missing_ship=0,missing_mode=0)
+    parts={}; totals=dict(regular=0,carrier=0,credit=0,missing_flex=0,missing_ship=0,missing_mode=0,missing_carrier=0)
     for ship in ids:
         sh=shipments.get(ship,{})
         linked=sorted([r for r in all_paid if r['envio_id']==ship],key=lambda r:r['id'])
@@ -93,10 +93,12 @@ def economic_details(c,seller,sales,all_paid):
         known=order['comision'] is not None and seller_cost is not None and credit is not None
         platform_net=order['total']-order['comision']-seller_cost+credit if known else None
         gain=platform_net-product_cost-carrier if platform_net is not None and not missing and carrier is not None else None
+        dispatch=seller_cost+carrier if seller_cost is not None and carrier is not None else None
+        sale_gain=order['total']-order['comision']-dispatch-product_cost if order['comision'] is not None and dispatch is not None and not missing else None
         item.update(tipo=sh['tipo'] if sh else ('pendiente' if order['envio_id'] else 'sin_envio'),envio_cliente=sh['cliente'] if sh else None,
           envio_bruto=sh['bruto'] if sh else None,bonificacion_info=sh['bonificacion_info'] if sh else None,
           envio_vendedor=seller_cost,repartidor=carrier,flex_credit=credit,neto_estimado=platform_net,costo_producto=product_cost,
-          unidades_sin_costo=missing,ganancia=gain,lineas=lines,comision_pct=Decimal(order['comision'])*100/Decimal(order['total']) if order['comision'] is not None and order['total'] else None,
+          unidades_sin_costo=missing,ganancia=gain,ganancia_venta=sale_gain,despacho=dispatch,lineas=lines,comision_pct=Decimal(order['comision'])*100/Decimal(order['total']) if order['comision'] is not None and order['total'] else None,
           envio_pct=Decimal(seller_cost)*100/Decimal(order['total']) if seller_cost is not None and order['total'] else None)
         rows.append(item)
         if order['estado']=='paid':
@@ -105,7 +107,9 @@ def economic_details(c,seller,sales,all_paid):
     paid_ship_ids={r['envio_id'] for r in sales if r['estado']=='paid' and r['envio_id']}
     for ship in paid_ship_ids:
         info=parts[ship]
-        if info['tipo']=='flex':totals['missing_flex']+=info['credit_total'] is None or info['carrier_total'] is None
+        if info['tipo']=='flex':
+            totals['missing_flex']+=info['credit_total'] is None or info['carrier_total'] is None
+            totals['missing_carrier']+=info['carrier_total'] is None
         elif any(v is None for v in info['seller'].values()):totals['missing_ship']+=1
     totals['rows']=rows
     return totals
@@ -118,14 +122,16 @@ def install(app,db,ml,queue,money,bp,private,period,api):
     def import_shipping(ship):
         seller=ml['get']('seller');token=ml['access_token']()
         shipment=api('/shipments/'+ship,token,extra_headers={'x-format-new':'true'})
-        if str(shipment.get('id'))!=ship or str(shipment.get('sender_id'))!=seller:
+        origin=shipment.get('origin') or {}
+        sender_ids=[str(value) for value in (shipment.get('sender_id'),origin.get('sender_id') if isinstance(origin,dict) else None) if value is not None]
+        if str(shipment.get('id'))!=ship or not sender_ids or any(value!=seller for value in sender_ids):
             raise ValueError('El envío no pertenece al vendedor conectado.')
         logistic=str(shipment.get('logistic_type') or (shipment.get('logistic') or {}).get('type') or '')
         typ='flex' if logistic=='self_service' else ('mercado_envios' if logistic in REGULAR else 'otro')
         costs=api('/shipments/'+ship+'/costs',token,extra_headers={'x-format-new':'true'})
         senders=costs.get('senders');receiver=costs.get('receiver') or {}
         if not isinstance(senders,list):raise ValueError('Los costos del envío todavía no están informados.')
-        matching=[r for r in senders if str(r.get('user_id'))==seller]
+        matching=[r for r in senders if isinstance(r,dict) and str(r.get('user_id'))==seller]
         cost=sum(money(r['cost']) for r in matching) if matching and all(r.get('cost') is not None for r in matching) else None
         buyer=money(receiver['cost']) if receiver.get('cost') is not None else None
         gross=money(costs['gross_amount']) if costs.get('gross_amount') is not None else None
@@ -195,7 +201,9 @@ def install(app,db,ml,queue,money,bp,private,period,api):
             detail=economic_details(c,seller,[dict(order)],all_paid)['rows'][0]
             movements=c.execute('SELECT * FROM negocio_flex_cargos WHERE seller_id=? AND envio_id=? ORDER BY periodo,id',(seller,order['envio_id'])).fetchall()
             shipment=c.execute('SELECT * FROM negocio_envio_detalle WHERE seller_id=? AND id=?',(seller,order['envio_id'])).fetchone()
-        return render_template('venta_detalle.html',v=detail,movements=movements,shipment=shipment)
+        with ml['state_db']() as c:
+            error=c.execute("SELECT error FROM reportes_pendientes WHERE clave=?",('envio:'+order['envio_id'],)).fetchone() if order['envio_id'] else None
+        return render_template('venta_detalle.html',v=detail,movements=movements,shipment=shipment,shipping_error=error['error'] if error else '')
 
     @bp.post('/admin/reportes/flex/<ship>/repartidor')
     @private

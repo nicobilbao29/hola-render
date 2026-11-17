@@ -270,6 +270,8 @@ def install(app,db,private,wa_link,limiter):
         missing_cost=sum(r['cantidad'] for r in lines if r['costo'] is None)
         missing_fees=sum(r['comision'] is None for r in paid); missing_ship=financial['missing_ship']; missing_flex=financial['missing_flex']
         incomplete=bool(missing_cost or missing_fees or missing_ship or missing_flex)
+        missing_dispatch=missing_ship+financial['missing_carrier']
+        sales_profit=None if (missing_cost or missing_fees or missing_dispatch or financial['missing_mode']) else gross-fees-shipping-costs
         top={}; daily={}; categories={}
         for r in lines:
             key=(r['item_id'],r['variante'])
@@ -285,7 +287,7 @@ def install(app,db,private,wa_link,limiter):
                     key=(r['producto_id'],r['detalle']); group[key]=group.get(key,0)+r['cantidad']
             rankings[kind]=[{'detalle':key[1],'cantidad':value} for key,value in sorted(group.items(),key=lambda p:p[1],reverse=True)[:15]]
         return dict(sales=sales,paid=paid,expenses=expenses,gross=gross,fees=fees,costs=costs,shipping=shipping,expense=expense,
-         result=None if incomplete else gross-fees-costs-shipping+credit-expense,missing_cost=missing_cost,missing_fees=missing_fees,missing_ship=missing_ship,missing_flex=missing_flex,flex_credit=credit,carrier=financial['carrier'],regular_shipping=financial['regular'],sale_details=financial['rows'],
+         result=None if incomplete else gross-fees-costs-shipping+credit-expense,profit=sales_profit,missing_dispatch=missing_dispatch,missing_cost=missing_cost,missing_fees=missing_fees,missing_ship=missing_ship,missing_flex=missing_flex,flex_credit=credit,carrier=financial['carrier'],regular_shipping=financial['regular'],sale_details=financial['rows'],
          top=sorted(top.values(),key=lambda r:r['unidades'],reverse=True)[:20],daily=sorted(daily.items()),expense_categories=categories,
          rankings=rankings,units=sum(r['cantidad'] for r in lines),metric_totals={k:sum(r['cantidad'] for r in metrics if r['tipo']==k) for k in rankings})
 
@@ -317,6 +319,26 @@ def install(app,db,private,wa_link,limiter):
             flash('Importación de ventas solicitada. Se procesa en segundo plano.','success')
         except ValueError as e: flash(str(e) or 'Revisa las fechas.','error')
         return redirect(url_for('reportes.dashboard'))
+
+    @bp.post('/admin/reportes/envios/actualizar')
+    @private
+    def shipping_sync():
+        try:
+            start=day(request.form.get('desde',''));end=day(request.form.get('hasta',''))
+            if start>end:raise ValueError('Revisa las fechas del período.')
+            if not ml['get']('refresh'):raise ValueError('Conecta primero tu cuenta de Mercado Libre.')
+            try:
+                with StorageLock(data/'.mercadolibre_operation.lock').acquire(timeout=0):
+                    with db() as c:
+                        shipments=c.execute("SELECT DISTINCT envio_id FROM negocio_ventas WHERE seller_id=? AND estado='paid' AND fecha BETWEEN ? AND ? AND envio_id!=''",(ml['get']('seller'),start,end)).fetchall()
+                    with ml['state_db']() as c:
+                        for row in shipments:queue('envio',row['envio_id'],c)
+            except TimeoutError:
+                raise ValueError('Hay una sincronización en curso. Espera unos segundos y reintenta.')
+            flash(f'Actualización solicitada para {len(shipments)} envíos del período. Se consultarán sus cargos en Mercado Libre.','success')
+        except ValueError as e:
+            flash(str(e),'error');return redirect(url_for('reportes.dashboard'))
+        return redirect(url_for('reportes.dashboard',desde=start,hasta=end))
 
     @bp.route('/admin/costos',methods=['GET','POST'])
     @private
@@ -378,9 +400,9 @@ def install(app,db,private,wa_link,limiter):
     def export(kind):
         start,end=period(); r=report(start,end)
         if kind=='ventas':
-            header=('Venta','Fecha Chile','Estado','Moneda','Venta CLP','Comisión CLP','Comisión efectiva %','Modalidad','Envío ID','Cliente pagó envío completo CLP','Tu cargo de envío asignado CLP','Bonificación Flex asignada CLP','Repartidor asignado CLP','Neto operativo estimado CLP','Costo producto conocido CLP','Ganancia estimada antes de gastos generales CLP')
+            header=('Venta','Fecha Chile','Estado','Moneda','Venta CLP','Comisión CLP','Comisión efectiva %','Modalidad','Envío ID','Cliente pagó envío completo CLP','Tu cargo de envío asignado CLP','Bonificación Flex asignada CLP','Repartidor asignado CLP','Neto operativo estimado CLP','Costo producto CLP','Resultado con bonificaciones Flex CLP','Despacho total CLP','Ganancia venta menos comisión despacho y mercadería CLP')
             def pesos(value):return '' if value is None else Decimal(value)/100
-            rows=[(s['id'],s['fecha'],s['estado'],'CLP',pesos(s['total']),pesos(s['comision']),s['comision_pct'],s['tipo'],s['envio_id'],pesos(s['envio_cliente']),pesos(s['envio_vendedor']),pesos(s['flex_credit']),pesos(s['repartidor']),pesos(s['neto_estimado']),pesos(s['costo_producto']),pesos(s['ganancia'])) for s in r['sale_details']]
+            rows=[(s['id'],s['fecha'],s['estado'],'CLP',pesos(s['total']),pesos(s['comision']),s['comision_pct'],s['tipo'],s['envio_id'],pesos(s['envio_cliente']),pesos(s['envio_vendedor']),pesos(s['flex_credit']),pesos(s['repartidor']),pesos(s['neto_estimado']),pesos(s['costo_producto']) if not s['unidades_sin_costo'] else '',pesos(s['ganancia']),pesos(s['despacho']),pesos(s['ganancia_venta'])) for s in r['sale_details']]
         elif kind=='gastos':
             header=('Fecha','Categoría','Descripción','Monto CLP'); rows=[(s['fecha'],s['categoria'],s['descripcion'],Decimal(s['monto'])/100) for s in r['expenses']]
         elif kind=='productos':
@@ -392,6 +414,7 @@ def install(app,db,private,wa_link,limiter):
                   GROUP BY l.item_id,l.variante ORDER BY SUM(l.cantidad) DESC''',(ml['get']('seller'),start,end))]
         elif kind=='resumen':
             header=('Concepto','Valor CLP o cantidad'); rows=[('Ventas pagadas',Decimal(r['gross'])/100),('Comisiones conocidas',Decimal(r['fees'])/100),('Mercadería con costo asignado',Decimal(r['costs'])/100),('Envíos ML conocidos',Decimal(r['regular_shipping'])/100),('Repartidor Flex conocido',Decimal(r['carrier'])/100),('Bonificación Flex neta registrada',Decimal(r['flex_credit'])/100),('Gastos',Decimal(r['expense'])/100),('Resultado estimado','INCOMPLETO' if r['result'] is None else Decimal(r['result'])/100),('Unidades sin costo',r['missing_cost']),('Ventas sin comisión',r['missing_fees']),('Envíos sin costo',r['missing_ship']),('Flex incompletos',r['missing_flex'])]
+            rows.extend([('Despacho total conocido',Decimal(r['shipping'])/100),('Ganancia de las ventas antes de bonificaciones y gastos','PENDIENTE' if r['profit'] is None else Decimal(r['profit'])/100)])
         else: abort(404)
         stream=io.StringIO(newline=''); writer=csv.writer(stream,delimiter=';'); writer.writerow(header)
         writer.writerows([[safe_csv(v) for v in row] for row in rows])

@@ -181,6 +181,8 @@ def install(app, db, private):
             permalink='https://'+link.netloc+link.path+('?' + link.query if link.query else '')
         except ValueError:
             raise MeliError('La publicación no incluye un enlace de compra válido.') from None
+        classifier=app.extensions.get('clasificacion')
+        proposal=classifier['prepare'](item,token) if classifier else None
         photos=[]
         for picture in item.get('pictures',[]):
             url=photo_url(picture.get('secure_url') or picture.get('url'))
@@ -207,6 +209,8 @@ def install(app, db, private):
                     category_id=c.execute("SELECT id FROM catalogo_categorias WHERE nombre='Mercado Libre' COLLATE NOCASE").fetchone()[0]
                     product_id=c.execute('INSERT INTO catalogo_productos(nombre,descripcion,precio,stock,enlace_ml,activo,categoria_id) VALUES (?,?,?,?,?,?,?)',(*fields,category_id)).lastrowid
                 c.execute('INSERT OR REPLACE INTO catalogo_ml_items VALUES (?,?,?,?,?)',(item_id,product_id,get('seller'),str(item.get('status',''))[:40],now))
+                if classifier and proposal:
+                    classifier['apply'](c,product_id,item_id,get('seller'),proposal)
                 c.execute('DELETE FROM catalogo_ml_fotos WHERE producto_id=?',(product_id,))
                 c.executemany('INSERT INTO catalogo_ml_fotos(producto_id,url,orden) VALUES (?,?,?)',[(product_id,url,i) for i,url in enumerate(photos)])
         put('last',now)

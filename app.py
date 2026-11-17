@@ -159,8 +159,10 @@ def create_app(test_config=None):
             return fn(*args, **kwargs)
         return wrapped
 
-    def categories():
+    def categories(public=False):
         with db() as conn:
+            if public:
+                return conn.execute('SELECT c.* FROM catalogo_categorias c WHERE EXISTS (SELECT 1 FROM catalogo_productos p WHERE p.categoria_id=c.id AND p.activo=1) ORDER BY c.nombre').fetchall()
             return conn.execute('SELECT * FROM catalogo_categorias ORDER BY nombre').fetchall()
 
     def find_product(product_id, public=False):
@@ -196,7 +198,7 @@ def create_app(test_config=None):
         slides = [{'src': url_for('photo', name=c['archivo']), 'titulo': c['titulo']} for c in covers]
         if not slides:
             slides = [{'src': url_for('static', filename='img/'+name+'.webp'), 'titulo': title} for name, title in [('chal','Detalles para una ocasión especial'),('blazer','Encaje que acompaña tu estilo'),('poncho','Un toque de color para destacar')]]
-        return render_template('catalog.html', slides=slides, products=products, categories=categories(), query=q, category=category, sort=sort)
+        return render_template('catalog.html', slides=slides, products=products, categories=categories(public=True), query=q, category=category, sort=sort)
 
     @app.get('/catalogo/producto/<int:product_id>')
     def product(product_id):
@@ -255,6 +257,7 @@ def create_app(test_config=None):
                     with db() as conn:
                         if category_id:
                             conn.execute('UPDATE catalogo_categorias SET nombre=? WHERE id=?', (name, category_id))
+                            conn.execute("UPDATE catalogo_ml_clasificacion SET manual=1,origen='manual' WHERE auto_categoria_id=?",(category_id,))
                         else:
                             conn.execute('INSERT INTO catalogo_categorias(nombre) VALUES (?)', (name,))
                     flash('Categoría guardada.', 'success')
@@ -408,7 +411,10 @@ def create_app(test_config=None):
                     category_id = conn.execute('SELECT id FROM catalogo_categorias WHERE nombre=? COLLATE NOCASE', (new_category,)).fetchone()['id']
                 fields = (name, description, price, stock, category_id, ml, values['activo'], values['destacado'])
                 if product_id:
+                    category_changed=item['categoria_id']!=category_id
                     conn.execute('''UPDATE catalogo_productos SET nombre=?,descripcion=?,precio=?,stock=?,categoria_id=?,enlace_ml=?,activo=?,destacado=? WHERE id=?''', (*fields, product_id))
+                    if linked and category_changed:
+                        app.extensions['clasificacion']['mark_manual'](conn,product_id)
                 else:
                     cursor = conn.execute('''INSERT INTO catalogo_productos(nombre,descripcion,precio,stock,categoria_id,enlace_ml,activo,destacado) VALUES (?,?,?,?,?,?,?,?)''', fields)
                     product_id = cursor.lastrowid
@@ -546,6 +552,8 @@ def create_app(test_config=None):
     install(app, db, private)
     from reportes import install as install_reportes
     install_reportes(app, db, private, wa_link, limiter)
+    from categorias_ml import install as install_categorias
+    install_categorias(app, db, private)
     return app
 
 
