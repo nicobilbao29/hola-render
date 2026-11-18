@@ -12,3 +12,5 @@
 .sale-receipt{max-width:850px;margin:24px auto}.sale-receipt>div{display:flex;justify-content:space-between;gap:24px;padding:18px 12px;border-bottom:1px solid #e4e8df}.sale-receipt small{display:block;font-size:.8rem;line-height:1.6;font-weight:normal;color:#687465}.sale-receipt b,.sale-receipt strong{text-align:right;white-space:nowrap}.receipt-subtotal{background:#f0f4e9}.sale-receipt .receipt-total{background:#273b2e;color:white;border-radius:10px;margin-top:16px;padding:24px}.receipt-total small{color:#dbe4d5}.receipt-total strong{font-size:1.6rem}@media(max-width:650px){.sale-receipt>div{flex-direction:column;gap:10px}.sale-receipt b,.sale-receipt strong{text-align:left}}
 
 .sales-kpis .sales-profit{grid-column:span 2}.profit-formula{padding:18px 22px;background:#edf3e9;border-left:4px solid #567147;line-height:1.7}.sales-kpis .text-link{margin-top:auto}@media(max-width:760px){.sales-kpis .sales-profit{grid-column:auto}}
+
+.publication-photos{display:flex;flex-wrap:wrap;gap:14px;margin:16px 0}.publication-photos a{display:block;background:#fff;border:1px solid #d9ddd4;border-radius:8px;padding:6px}.publication-photos img{max-width:100%;display:block}

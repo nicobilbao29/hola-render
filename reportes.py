@@ -52,6 +52,9 @@ GASTOS = ('Página web y dominio','Personal','Publicidad','Embalaje','Envíos ad
 from desglose_envios import TABLES as SHIPPING_TABLES, SCHEMA as SHIPPING_SCHEMA, validate as validate_shipping
 TABLES.update(SHIPPING_TABLES)
 SCHEMA+=SHIPPING_SCHEMA
+from publicaciones import TABLES as PUBLICATION_TABLES, SCHEMA as PUBLICATION_SCHEMA, validate as validate_publications
+TABLES.update(PUBLICATION_TABLES)
+SCHEMA+=PUBLICATION_SCHEMA
 
 
 def money(value):
@@ -84,7 +87,7 @@ def validate_backup(rows):
     for table in TABLES:
         for r in rows.get(table,[]):
             if set(r)!=set(TABLES[table]): raise ValueError('Columnas de reportes incompatibles.')
-            if any(isinstance(v,str) and len(v)>300 for v in r.values()): raise ValueError('Dato de reporte demasiado largo.')
+            if any(isinstance(v,str) and len(v)>(2000 if table=='negocio_publicacion_fotos' and key=='url' else 300) for key,v in r.items()): raise ValueError('Dato de reporte demasiado largo.')
             if 'fecha' in r: day(r['fecha'])
             if 'seller_id' in r and not ident(r['seller_id']): raise ValueError('Vendedor no válido en reporte.')
             for key in ('costo','comision','total','precio','monto'):
@@ -95,6 +98,7 @@ def validate_backup(rows):
             if table=='negocio_envios' and not ident(r['id']): raise ValueError('Envío inválido.')
             if table=='negocio_gastos' and (type(r['id']) is not int or r['id']<1 or r['categoria'] not in GASTOS or r['monto']<=0): raise ValueError('Gasto inválido.')
             if table=='catalogo_metricas' and (r['tipo'] not in ('visita','busqueda','ml','wa') or type(r['cantidad']) is not int or r['cantidad']<0 or type(r['producto_id']) is not int or r['producto_id']<0): raise ValueError('Estadística inválida.')
+    validate_publications(rows)
 
 
 def install(app,db,private,wa_link,limiter):
@@ -162,6 +166,7 @@ def install(app,db,private,wa_link,limiter):
                             saved=c.execute("SELECT costo FROM negocio_costos WHERE seller_id=? AND item_id=? AND variante=''",(seller,item_id)).fetchone()
                         cost=saved[0] if saved else None
                     c.execute('INSERT INTO negocio_lineas VALUES (?,?,?,?,?,?,?,?)',(oid,i,item_id,variant,title,qty,price,cost))
+                if app.extensions.get('publicaciones'):app.extensions['publicaciones']['record_order'](c,order)
                 if ship:
                     c.execute('INSERT OR IGNORE INTO negocio_envios VALUES (?,?,NULL,?)',(seller,ship,now))
         if ship: queue('envio',ship)
@@ -202,7 +207,7 @@ def install(app,db,private,wa_link,limiter):
             job=c.execute('SELECT * FROM reportes_pendientes WHERE proximo<=? ORDER BY proximo,clave LIMIT 1',(time.time(),)).fetchone()
         if job:
             try:
-                handler={'venta':import_order,'envio':import_shipping,'facturacion':shipping_features['import_billing']}.get(job['tipo'])
+                handler={'venta':import_order,'envio':import_shipping,'facturacion':shipping_features['import_billing'],'primera_venta':publication_features['first_sale']}.get(job['tipo'])
                 if not handler:raise ValueError('Tarea no compatible.')
                 handler(job['recurso'])
                 with ml['state_db']() as c: c.execute('DELETE FROM reportes_pendientes WHERE clave=? AND version=?',(job['clave'],job['version']))
@@ -503,5 +508,7 @@ def install(app,db,private,wa_link,limiter):
     from desglose_envios import install as install_shipping
     shipping_features=install_shipping(app,db,ml,queue,money,bp,private,period,lambda *a,**kw:api_request(*a,**kw))
     import_shipping=shipping_features['import_shipping']
+    from publicaciones import install as install_publications
+    publication_features=install_publications(app,db,ml,queue,bp,private,period,lambda *a,**kw:api_request(*a,**kw))
     app.register_blueprint(bp)
     app.extensions['reportes']={'tick':tick,'notification':notification,'import_order':import_order,'import_shipping':import_shipping,'import_billing':shipping_features['import_billing'],'start_scan':start_scan,'report':report,'queue':queue}

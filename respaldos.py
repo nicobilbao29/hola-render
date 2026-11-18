@@ -318,7 +318,7 @@ def apply_review(database, data, token):
         conn.execute('BEGIN IMMEDIATE')
         original_files = [r[0] for r in conn.execute('SELECT archivo FROM catalogo_fotos UNION SELECT archivo FROM catalogo_portadas')]
         from reportes import TABLES
-        financial_order=('negocio_ventas','negocio_lineas','negocio_envios','negocio_costos','negocio_gastos','catalogo_metricas','negocio_envio_detalle','negocio_flex_cargos','negocio_flex_control')
+        financial_order=('negocio_ventas','negocio_lineas','negocio_envios','negocio_costos','negocio_gastos','catalogo_metricas','negocio_envio_detalle','negocio_flex_cargos','negocio_flex_control','negocio_publicaciones','negocio_publicacion_fotos')
         for table in reversed(financial_order):
             if table in rows:
                 conn.execute(f'DELETE FROM {table}')

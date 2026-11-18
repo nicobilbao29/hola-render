@@ -213,6 +213,7 @@ def install(app, db, private):
                     classifier['apply'](c,product_id,item_id,get('seller'),proposal)
                 c.execute('DELETE FROM catalogo_ml_fotos WHERE producto_id=?',(product_id,))
                 c.executemany('INSERT INTO catalogo_ml_fotos(producto_id,url,orden) VALUES (?,?,?)',[(product_id,url,i) for i,url in enumerate(photos)])
+                if app.extensions.get('publicaciones'):app.extensions['publicaciones']['record_item'](c,item,photos)
         put('last',now)
 
     def scan():
