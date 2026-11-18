@@ -88,3 +88,11 @@ document.querySelectorAll('[data-cover-picker] input').forEach(input => {
     input.closest('form').querySelector('select[name="foto_producto"]').value = input.value;
   });
 });
+
+// Al elegir otro producto, muestra su costo vigente o deja el campo vacío.
+document.addEventListener('change', function(event) {
+  if (!event.target.matches('[data-cost-picker]')) return;
+  var input = event.target.form.querySelector('input[name="costo"]');
+  var option = event.target.selectedOptions[0];
+  if (input) input.value = option ? (option.dataset.cost || '') : '';
+});

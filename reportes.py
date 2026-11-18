@@ -154,9 +154,12 @@ def install(app,db,private,wa_link,limiter):
                 c.execute('DELETE FROM negocio_lineas WHERE venta_id=?',(oid,))
                 for i,item_id,variant,title,qty,price in parsed:
                     old=previous.get(i)
-                    cost=old['costo'] if old and old['item_id']==item_id and old['variante']==variant else None
-                    if cost is None:
+                    same_line=old and old['item_id']==item_id and old['variante']==variant
+                    cost=old['costo'] if same_line else None
+                    if not same_line:
                         saved=c.execute('SELECT costo FROM negocio_costos WHERE seller_id=? AND item_id=? AND variante=?',(seller,item_id,variant)).fetchone()
+                        if saved is None and variant:
+                            saved=c.execute("SELECT costo FROM negocio_costos WHERE seller_id=? AND item_id=? AND variante=''",(seller,item_id)).fetchone()
                         cost=saved[0] if saved else None
                     c.execute('INSERT INTO negocio_lineas VALUES (?,?,?,?,?,?,?,?)',(oid,i,item_id,variant,title,qty,price,cost))
                 if ship:
@@ -344,28 +347,51 @@ def install(app,db,private,wa_link,limiter):
     @private
     def costs_page():
         seller=ml['get']('seller')
+        start,end=period()
+        selection=request.args.get('producto','')
         if request.method=='POST':
             try:
                 selection=request.form.get('producto','')
                 if '|' not in selection: raise ValueError('Selecciona un producto válido.')
                 item,variant=selection.split('|',1)
                 value=money(request.form.get('costo',''))
+                mode=request.form.get('aplicar','no')
+                if mode not in ('si','no','periodo'):raise ValueError('Selecciona cómo aplicar el costo.')
+                start=day(request.form.get('desde') or start);end=day(request.form.get('hasta') or end)
+                if start>end:raise ValueError('La fecha inicial debe ser anterior o igual a la final.')
                 if not seller or not re.fullmatch(r'MLC[0-9]{6,20}',item) or (variant and not re.fullmatch(r'[0-9]{1,25}',variant)): raise ValueError('Selecciona un producto válido.')
                 with db() as c:
                     known=c.execute('SELECT 1 FROM catalogo_ml_items WHERE seller_id=? AND item_id=? UNION SELECT 1 FROM negocio_lineas l JOIN negocio_ventas v ON v.id=l.venta_id WHERE v.seller_id=? AND l.item_id=? LIMIT 1',(seller,item,seller,item)).fetchone()
                     if not known: raise ValueError('Producto no encontrado en esta cuenta.')
                     c.execute('INSERT OR REPLACE INTO negocio_costos VALUES (?,?,?,?)',(seller,item,variant,value))
-                    if request.form.get('aplicar')=='si':
-                        c.execute('''UPDATE negocio_lineas SET costo=? WHERE item_id=? AND variante=? AND costo IS NULL AND venta_id IN
-                          (SELECT id FROM negocio_ventas WHERE seller_id=?)''',(value,item,variant,seller))
-                flash('Costo guardado. Los costos históricos ya asignados se conservan.','success')
-            except ValueError as e: flash(str(e),'error')
-            return redirect(url_for('reportes.costs_page'))
+                    updated=0
+                    if mode!='no':
+                        condition='item_id=?';params=[value,item]
+                        if variant:condition+=' AND variante=?';params.append(variant)
+                        if mode=='si':condition+=' AND costo IS NULL'
+                        condition+=' AND venta_id IN (SELECT id FROM negocio_ventas WHERE seller_id=?';params.append(seller)
+                        if mode=='periodo':condition+=' AND fecha BETWEEN ? AND ?';params.extend((start,end))
+                        condition+=')'
+                        updated=c.execute('UPDATE negocio_lineas SET costo=? WHERE '+condition,params).rowcount
+                flash(f'Costo guardado. Se actualizaron {updated} líneas de ventas importadas. El dashboard y el Excel se recalculan al abrirlos.','success')
+                if mode=='si' and not updated:
+                    flash('No había ventas sin costo para esa selección. Para corregir un costo ya asignado, elige Corregir ventas del período.','success')
+            except ValueError as e:
+                flash(str(e),'error');start,end=period()
+            return redirect(url_for('reportes.costs_page',producto=selection,desde=start,hasta=end))
         with db() as c:
-            options=c.execute('''SELECT DISTINCT l.item_id,l.variante,l.nombre FROM negocio_lineas l JOIN negocio_ventas v ON v.id=l.venta_id WHERE v.seller_id=?
-              UNION SELECT i.item_id,'' variante,p.nombre FROM catalogo_ml_items i JOIN catalogo_productos p ON p.id=i.producto_id WHERE i.seller_id=? ORDER BY nombre''',(seller,seller)).fetchall()
+            options=c.execute('''WITH source AS (
+              SELECT l.item_id,l.variante,l.nombre FROM negocio_lineas l JOIN negocio_ventas v ON v.id=l.venta_id WHERE v.seller_id=?
+              UNION ALL SELECT i.item_id,'' variante,p.nombre FROM catalogo_ml_items i JOIN catalogo_productos p ON p.id=i.producto_id WHERE i.seller_id=?)
+              SELECT item_id,variante,MAX(nombre) nombre FROM (SELECT * FROM source UNION ALL SELECT item_id,'' variante,nombre FROM source)
+              GROUP BY item_id,variante ORDER BY nombre,item_id,variante''',(seller,seller)).fetchall()
             costs=c.execute('SELECT * FROM negocio_costos WHERE seller_id=? ORDER BY item_id,variante',(seller,)).fetchall()
-        return render_template('costos.html',options=options,costs=costs)
+            valid={r['item_id']+'|'+r['variante'] for r in options}
+            if selection not in valid:selection=options[0]['item_id']+'|'+options[0]['variante'] if options else ''
+            saved=next((r for r in costs if r['item_id']+'|'+r['variante']==selection),None)
+            cost_value=format(Decimal(saved['costo'])/100,'f') if saved else ''
+            cost_values={r['item_id']+'|'+r['variante']:format(Decimal(r['costo'])/100,'f') for r in costs}
+        return render_template('costos.html',options=options,costs=costs,selection=selection,cost_value=cost_value,cost_values=cost_values,desde=start,hasta=end)
 
     @bp.route('/admin/gastos',methods=['GET','POST'])
     @private
@@ -419,6 +445,14 @@ def install(app,db,private,wa_link,limiter):
         stream=io.StringIO(newline=''); writer=csv.writer(stream,delimiter=';'); writer.writerow(header)
         writer.writerows([[safe_csv(v) for v in row] for row in rows])
         return Response('\ufeff'+stream.getvalue(),mimetype='text/csv',headers={'Content-Disposition':f'attachment; filename="{kind}_{start}_{end}.csv"'})
+
+    @bp.get('/admin/reportes/excel')
+    @private
+    def export_excel():
+        from excel_reportes import build_excel, MIME
+        start,end=period()
+        content=build_excel(report(start,end),start,end,ml['get']('seller'))
+        return Response(content,mimetype=MIME,headers={'Content-Disposition':f'attachment; filename="ventas_{start}_{end}.xlsx"'})
 
     def record(kind,product_id,detail):
         if session.get('admin') or request.method!='GET': return

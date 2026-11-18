@@ -2,6 +2,8 @@ import io
 import sqlite3
 import time
 import unittest
+import zipfile
+from xml.etree import ElementTree as ET
 from copy import deepcopy
 from unittest.mock import patch
 from urllib.parse import parse_qs,urlsplit
@@ -39,6 +41,106 @@ class ReportesTest(unittest.TestCase):
         self.assertEqual(local_day('2026-11-01T01:00:00Z'),'2026-10-31')
         for bad in ('NaN','Infinity','-1','1.000.000'):
             with self.assertRaises(ValueError):money(bad)
+
+    def test_general_cost_updates_missing_variant_sales_and_dashboard_and_excel(self):
+        self.setup_sales();self.import_one();self.shipping();token=self.login()
+        response=self.client.post('/admin/costos',data={'csrf_token':token,'producto':'MLC123456789|','costo':'1500','aplicar':'si','desde':'2026-11-01','hasta':'2026-11-30'})
+        self.assertEqual(response.status_code,302)
+        r=self.result();self.assertEqual(r['costs'],300000);self.assertEqual(r['missing_cost'],0)
+        self.assertEqual(r['profit'],1998000-200150-250000-300000)
+        html=self.client.get(response.location).get_data(as_text=True)
+        self.assertIn('Se actualizaron 1 líneas',html);self.assertIn('value="1500"',html)
+        self.assertIn('desde=2026-11-01',html)
+        with zipfile.ZipFile(io.BytesIO(self.client.get('/admin/reportes/excel?desde=2026-11-01&hasta=2026-11-30').data)) as z:
+            ns={'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+            cells={c.attrib['r']:c for c in ET.fromstring(z.read('xl/worksheets/sheet2.xml')).findall('.//s:c',ns)}
+            self.assertEqual(cells['I7'].find('s:v',ns).text,'3000')
+
+    def test_general_cost_future_fallback_and_specific_variant_priority(self):
+        self.setup_sales();self.import_one();token=self.login()
+        self.client.post('/admin/costos',data={'csrf_token':token,'producto':'MLC123456789|','costo':'500','aplicar':'no'})
+        with sqlite3.connect(self.data/'practica.db') as c:
+            self.assertIsNone(c.execute("SELECT costo FROM negocio_lineas WHERE venta_id='1001'").fetchone()[0])
+        self.import_one();self.assertEqual(self.result()['missing_cost'],2)
+        self.import_one(self.order(id=1004))
+        self.client.post('/admin/costos',data={'csrf_token':token,'producto':'MLC123456789|99','costo':'900','aplicar':'no'})
+        self.import_one(self.order(id=1002))
+        changed=self.order(id=1003);changed['order_items'][0]['item']['variation_id']=88
+        self.import_one(changed)
+        with sqlite3.connect(self.data/'practica.db') as c:
+            self.assertEqual(dict(c.execute('SELECT venta_id,costo FROM negocio_lineas')),{'1001':None,'1004':50000,'1002':90000,'1003':50000})
+
+    def test_correction_recalculates_only_selected_period_variant_and_seller(self):
+        self.setup_sales();self.import_one();self.import_one(self.order(id=1002,date_closed='2026-12-01T15:00:00Z'));token=self.login()
+        with sqlite3.connect(self.data/'practica.db') as c:
+            c.execute('UPDATE negocio_lineas SET costo=0')
+            c.execute("INSERT INTO negocio_ventas VALUES ('9000','999','2026-11-01','paid','CLP',1000,100,'','now')")
+            c.execute("INSERT INTO negocio_lineas VALUES ('9000',0,'MLC123456789','99','Otra cuenta',1,1000,0)")
+        self.client.post('/admin/costos',data={'csrf_token':token,'producto':'MLC123456789|99','costo':'1200','aplicar':'si'})
+        self.assertEqual(self.result()['costs'],0)
+        response=self.client.post('/admin/costos',data={'csrf_token':token,'producto':'MLC123456789|99','costo':'1500','aplicar':'periodo','desde':'2026-11-01','hasta':'2026-11-30'})
+        self.assertEqual(response.status_code,302)
+        with sqlite3.connect(self.data/'practica.db') as c:
+            self.assertEqual(dict(c.execute('SELECT venta_id,costo FROM negocio_lineas')),{'1001':150000,'1002':0,'9000':0})
+        self.import_one();self.assertEqual(self.result()['costs'],300000)
+        self.client.post('/admin/costos',data={'csrf_token':token,'producto':'MLC123456789|99','costo':'9000','aplicar':'periodo','desde':'2026-12-01','hasta':'2026-11-01'})
+        self.assertEqual(self.result()['costs'],300000)
+
+    def test_excel_download_preserves_ids_numbers_formula_and_seller_period(self):
+        self.setup_sales();token=self.login()
+        self.import_one(self.order(id=2000016109792123,shipping={'id':48553923514}))
+        self.import_one(self.order(id=1002,date_closed='2026-12-01T15:00:00Z'))
+        with sqlite3.connect(self.data/'practica.db') as c:
+            c.execute("INSERT INTO negocio_ventas VALUES ('9999','999','2026-11-01','paid','CLP',10000,1000,'','now')")
+            c.execute('UPDATE negocio_lineas SET costo=100000 WHERE venta_id=?',('2000016109792123',))
+            c.execute("INSERT OR REPLACE INTO negocio_envios VALUES ('123','48553923514',250000,'now')")
+            c.execute("INSERT INTO negocio_envio_detalle VALUES ('123','48553923514','mercado_envios',450000,700000,NULL,NULL,'now')")
+        url='/admin/reportes/excel?desde=2026-11-01&hasta=2026-11-30'
+        response=self.client.get(url)
+        self.assertEqual(response.status_code,200);self.assertIn('.xlsx',response.headers['Content-Disposition'])
+        self.assertIn('no-store',response.headers['Cache-Control'])
+        with zipfile.ZipFile(io.BytesIO(response.data)) as z:
+            self.assertIsNone(z.testzip())
+            ns={'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+            cells={c.attrib['r']:c for c in ET.fromstring(z.read('xl/worksheets/sheet2.xml')).findall('.//s:c',ns)}
+            self.assertEqual(cells['A7'].attrib['t'],'inlineStr')
+            self.assertEqual(cells['A7'].find('s:is/s:t',ns).text,'2000016109792123')
+            self.assertEqual(cells['B7'].find('s:is/s:t',ns).text,'48553923514')
+            self.assertNotIn('A8',cells)
+            self.assertEqual(cells['F7'].find('s:v',ns).text,'19980')
+            self.assertEqual(cells['J7'].find('s:v',ns).text,'13478.5')
+            self.assertIn('F7-G7-H7-I7',cells['J7'].find('s:f',ns).text)
+            self.assertEqual(cells['C7'].attrib['s'],'4')
+            summary={c.attrib['r']:c for c in ET.fromstring(z.read('xl/worksheets/sheet1.xml')).findall('.//s:c',ns)}
+            self.assertEqual(summary['B11'].find('s:v',ns).text,'13478.5')
+        self.assertEqual(self.app.test_client().get(url).status_code,302)
+        self.assertEqual(self.client.get('/admin/reportes/excel?desde=bad').status_code,400)
+
+    def test_excel_pending_is_blank_not_free_and_product_text_is_not_formula(self):
+        self.setup_sales();self.login()
+        order=self.order();order['order_items'][0]['item']['title']='=HYPERLINK("https://example.test")\x00'
+        self.import_one(order)
+        response=self.client.get('/admin/reportes/excel?desde=2026-11-01&hasta=2026-11-30')
+        ns={'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+        with zipfile.ZipFile(io.BytesIO(response.data)) as z:
+            cells={c.attrib['r']:c for c in ET.fromstring(z.read('xl/worksheets/sheet2.xml')).findall('.//s:c',ns)}
+            self.assertEqual(cells['E7'].attrib['t'],'inlineStr');self.assertIsNone(cells['E7'].find('s:f',ns))
+            self.assertIsNone(cells['H7'].find('s:v',ns));self.assertIsNone(cells['I7'].find('s:v',ns))
+            self.assertEqual(cells['J7'].find('s:v',ns).text,'Pendiente')
+            self.assertIn('Costo mercadería',cells['K7'].find('s:is/s:t',ns).text)
+        empty=self.client.get('/admin/reportes/excel?desde=2025-01-01&hasta=2025-01-31')
+        self.assertEqual(empty.status_code,200)
+        with zipfile.ZipFile(io.BytesIO(empty.data)) as z:ET.fromstring(z.read('xl/worksheets/sheet2.xml'))
+
+    def test_excel_includes_more_than_200_orders(self):
+        self.setup_sales();self.login();self.import_one()
+        with sqlite3.connect(self.data/'practica.db') as c:
+            c.executemany('INSERT INTO negocio_ventas VALUES (?,?,?,?,?,?,?,?,?)',[(str(1002+i),'123','2026-11-01','paid','CLP',10000,1000,'','now') for i in range(205)])
+        response=self.client.get('/admin/reportes/excel?desde=2026-11-01&hasta=2026-11-30')
+        with zipfile.ZipFile(io.BytesIO(response.data)) as z:
+            ns={'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+            rows=ET.fromstring(z.read('xl/worksheets/sheet2.xml')).findall('s:sheetData/s:row',ns)
+            self.assertEqual(sum(int(r.attrib['r'])>=7 for r in rows),206)
 
     def test_new_shipping_format_reads_origin_and_keeps_decimal_charge(self):
         self.setup_sales();self.import_one()
